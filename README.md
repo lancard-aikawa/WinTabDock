@@ -1,9 +1,9 @@
-# ToolDock
+# WinTabDock
 
 別々に起動したツールの窓を、1 つの枠にタブでまとめる Windows 用のアプリです。
 自作のツールを 1 つずつ起動していくと、タスクバーと窓がどんどん増えて散らかる、を減らすためのものです。
 
-![ToolDock。上のタブで Todo・メモ・タイマーを切り替える](docs/images/dock.png)
+![WinTabDock。上のタブで Todo・メモ・タイマーを切り替える](docs/images/dock.png)
 
 <sub>画面は架空のデモアプリを取り込んだものです。</sub>
 
@@ -13,10 +13,10 @@
 
 ## ダウンロード
 
-[Releases](https://github.com/lancard-aikawa/ToolDock/releases) の `ToolDock-<版>-win-x64.zip` を展開し、`ToolDock.exe` を起動します (Windows 10 / 11)。
+[Releases](https://github.com/lancard-aikawa/WinTabDock/releases) の `WinTabDock-<版>-win-x64.zip` を展開し、`WinTabDock.exe` を起動します (Windows 10 / 11)。
 
-1. `ToolDock.exe` の隣の `tooldock.toml` に、まとめたいツールを書きます (書き方は中の見本のとおり)
-2. `ToolDock.exe` を起動し、右上の「+ 起動 / 取り込む」からツールを起動します
+1. `WinTabDock.exe` の隣の `wintabdock.toml` に、まとめたいツールを書きます (書き方は中の見本のとおり)
+2. `WinTabDock.exe` を起動し、右上の「+ 起動 / 取り込む」からツールを起動します
 
 ```toml
 [[tool]]
@@ -45,9 +45,9 @@ exe = "C:/Tools/MyTool/MyTool.exe"
 
 - 「一緒に閉じる」では、ツールに × と同じ閉じる操作を送って 5 秒待ちます。保存の確認などで閉じなかったツールは、元の窓に戻して残します
 - ドックの大きさ・位置は、次に開いたときに戻ります
-- ここで選んだ内容と前回のタブは `%LOCALAPPDATA%\ToolDock\` に保存します。`tooldock.toml` は書き換えません
+- ここで選んだ内容と前回のタブは `%LOCALAPPDATA%\WinTabDock\` に保存します。`wintabdock.toml` は書き換えません
 
-`tooldock.toml` の設定:
+`wintabdock.toml` の設定:
 
 ```toml
 auto_adopt = true       # ドックの外で起動した登録済みのツールも自動でタブにする
@@ -59,7 +59,7 @@ restore_session = true  # 「起動時に開く」をまだ選んでいないと
 - **管理者として動いている窓**は取り込めません (Windows が普通の権限のアプリからの操作を許さないため)
 - **ストアアプリ** (電卓・設定など) は、Windows 共通のプロセスが窓を持つので扱いません
 - ドックが異常終了すると、取り込んでいた窓が枠なしのまま残ることがあります。次にドックを起動すると元に戻ります
-  (すぐ戻したいときは、ソースから `uv run tooldock.py --rescue`)
+  (すぐ戻したいときは、ソースから `uv run wintabdock.py --rescue`)
 
 ## 開発
 

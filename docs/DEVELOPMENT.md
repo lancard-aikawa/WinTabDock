@@ -1,23 +1,23 @@
-# ToolDock 開発メモ
+# WinTabDock 開発メモ
 
 使い方は [README](../README.md)。ここには、仕組みと、変えるときに守ること・試して分かったこと。
 
 ## ソースから動かす・exe を作る
 
 ```sh
-uv run tooldock.py              # tooldock.toml のツールを並べたドックを開く (tooldock.example.toml を写して作る)
-uv run tooldock.py --rescue     # ドックが落ちて隠れたままの窓を元に戻す
-pwsh packaging/build.ps1        # dist/ToolDock/ に ToolDock.exe (窓なし) と _internal/ を作る
-pwsh packaging/build.ps1 -Zip   # 配布用の dist/ToolDock-<版>-win-x64.zip も作る (設定は見本を入れる)
+uv run wintabdock.py              # wintabdock.toml のツールを並べたドックを開く (wintabdock.example.toml を写して作る)
+uv run wintabdock.py --rescue     # ドックが落ちて隠れたままの窓を元に戻す
+pwsh packaging/build.ps1        # dist/WinTabDock/ に WinTabDock.exe (窓なし) と _internal/ を作る
+pwsh packaging/build.ps1 -Zip   # 配布用の dist/WinTabDock-<版>-win-x64.zip も作る (設定は見本を入れる)
 uv run demo/shoot.py            # README の画面 (架空のデモアプリを取り込んだドック) を撮り直す
 ```
 
-- 設定は exe の隣の `tooldock.toml`。ビルド時に無ければ見本を置く (あれば上書きしない)
+- 設定は exe の隣の `wintabdock.toml`。ビルド時に無ければ見本を置く (あれば上書きしない)
 - 「設定」の「ログイン時に起動する」で、HKCU の Run に exe の場所を登録する。exe を移動したら入れ直す
 - 窓なしの exe では `sys.stdout` が `None`。`sys.stdout.reconfigure()` をそのまま呼ぶと起動しなかった
 - アイコンの元は `assets/icon.svg` (48px 以上) と `assets/icon-small.svg` (32px 以下)。`uv run tools/make-icon.py` で ICO を作り直す
 - exe の確かめ方: `uv run check_exe.py`。exe を一時フォルダにコピーし、PortWho と RepoTether だけの設定と
-  `TOOLDOCK_HOME` (控えと前回のタブの置き場所) を一時フォルダに向けて動かす。人の前回のタブや他のツールには触れない
+  `WINTABDOCK_HOME` (控えと前回のタブの置き場所) を一時フォルダに向けて動かす。人の前回のタブや他のツールには触れない
 
 ## 仕組み (仮想タブ)
 
@@ -31,7 +31,7 @@ uv run demo/shoot.py            # README の画面 (架空のデモアプリを�
 - 取り込んだ窓はタイトルバーを外して隠すので、窓を探しても見つからない。二重起動を避けるため、タブに exe を覚えておく
 - 元に戻すときは、属性を戻して見せたあと `ITaskbarList::AddTab` でタスクバーのボタンを明示的に足す。属性が元どおりでも
   タスクバーがボタンを付け直さないことがあった (自動で取り込んだ PortWho が、ドックを閉じたあとタスクバーに出なかった)
-- 取り込んだ窓の元の状態 (枠・所有者・位置) は `%LOCALAPPDATA%\ToolDock\state-<プロセス番号>.json` に控える。
+- 取り込んだ窓の元の状態 (枠・所有者・位置) は `%LOCALAPPDATA%\WinTabDock\state-<プロセス番号>.json` に控える。
   ドックが落ちても相手の窓とプロセスは残り (所有者が外れるだけ)、次の起動か `--rescue` で元の枠に戻る。
   戻すのは、もう動いていないドックの控えだけ。1 つの `state.json` を共有していたときは、2 つ目のドックが
   動いている方のドックの控えを「前回落ちたもの」と取り違えて窓を戻し、控えを消した。
@@ -52,7 +52,7 @@ uv run demo/shoot.py            # README の画面 (架空のデモアプリを�
 ## 確かめ方 (自分のツール PortWho・RepoTether などを使う。対象のツールとほかのドックを閉じてから流す)
 
 ```sh
-uv run tooldock.py --selftest LPortMan PortWho   # 取り込み・二重起動・切り替え・リサイズ・移動 (途中も見えるか)・メニュー・最小化・別アプリとの重なり・起動時に開く・閉じるときのツール・外す・閉じる・自動取り込み (48 項目)
+uv run wintabdock.py --selftest LPortMan PortWho   # 取り込み・二重起動・切り替え・リサイズ・移動 (途中も見えるか)・メニュー・最小化・別アプリとの重なり・起動時に開く・閉じるときのツール・外す・閉じる・自動取り込み (48 項目)
 uv run check_rescue.py LPortMan                  # 取り込んだまま落として、--rescue で戻るか
 uv run check_state_files.py                      # 動いているドックの控えに触らないか (窓には触れない)
 uv run check_session.py PortWho RepoTether       # 前回のタブ: 起動中なら取り込み、なければ起動して並べ直すか

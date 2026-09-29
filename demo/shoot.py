@@ -19,7 +19,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-import tooldock as td  # noqa: E402
+import wintabdock as td  # noqa: E402
 from PIL import ImageGrab  # noqa: E402
 
 td.ctypes.windll.shcore.SetProcessDpiAwareness(2)

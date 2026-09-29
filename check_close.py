@@ -19,7 +19,7 @@ import subprocess
 import sys
 import time
 
-import tooldock as td
+import wintabdock as td
 from selftest import count_processes, on_taskbar, taskbar_names
 
 sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
@@ -46,8 +46,8 @@ def close_leftovers():
 
 
 def run(case: str) -> dict:
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "TOOLDOCK_CLOSE_CASE": case}
-    out = subprocess.run([sys.executable, "tooldock.py", "--selftest", "close-check", *names], capture_output=True,
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "WINTABDOCK_CLOSE_CASE": case}
+    out = subprocess.run([sys.executable, "wintabdock.py", "--selftest", "close-check", *names], capture_output=True,
                          text=True, encoding="utf-8", env=env, timeout=120)
     lines = {}
     for line in out.stdout.splitlines():

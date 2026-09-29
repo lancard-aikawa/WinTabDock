@@ -2,11 +2,11 @@
 # requires-python = ">=3.11"
 # dependencies = ["pillow"]
 # ///
-"""ToolDock (試作): 別々に起動した exe の窓を 1 つの枠にタブでまとめる。
+"""WinTabDock (試作): 別々に起動した exe の窓を 1 つの枠にタブでまとめる。
 
-    uv run tooldock.py              # tooldock.toml のツールを並べたドックを開く
-    uv run tooldock.py --rescue     # 落ちたドックが隠したままの窓を元に戻す
-    uv run tooldock.py --selftest LPortMan PortWho   # 自動の確認 (docs/ に画像を書く)
+    uv run wintabdock.py              # wintabdock.toml のツールを並べたドックを開く
+    uv run wintabdock.py --rescue     # 落ちたドックが隠したままの窓を元に戻す
+    uv run wintabdock.py --selftest LPortMan PortWho   # 自動の確認 (docs/ に画像を書く)
 
 仕組み (仮想タブ): 相手の窓はトップレベルのまま、枠のタイトル・縁を外してドックの本体の上に重ねる。
 窓の所有者 (owner) をドックにするので、Windows が常にツールをドックより手前に置き、最小化も一緒になり、
@@ -208,10 +208,10 @@ def find_window(pids: set[int], exe: str | None = None) -> int | None:
 
 # 控えはドック (プロセス) ごとに分ける。1 つのファイルを共有していたとき、試験で開いた 2 つ目のドックが
 # 動いている方のドックの控えを「前回落ちたもの」と取り違え、その窓を元に戻したうえで控えを消した
-# 控えと前回のタブの置き場所。TOOLDOCK_HOME で変えられる (exe を試すとき、人の前回のタブに触れないように)
-STATE_DIR = Path(os.environ.get("TOOLDOCK_HOME") or Path(os.environ.get("LOCALAPPDATA", ".")) / "ToolDock")
+# 控えと前回のタブの置き場所。WINTABDOCK_HOME で変えられる (exe を試すとき、人の前回のタブに触れないように)
+STATE_DIR = Path(os.environ.get("WINTABDOCK_HOME") or Path(os.environ.get("LOCALAPPDATA", ".")) / "WinTabDock")
 
-# exe (PyInstaller) では、設定 (tooldock.toml) は exe の隣、同梱したアイコンは _MEIPASS にある
+# exe (PyInstaller) では、設定 (wintabdock.toml) は exe の隣、同梱したアイコンは _MEIPASS にある
 FROZEN = bool(getattr(sys, "frozen", False))
 APP_DIR = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
@@ -222,7 +222,7 @@ def autostart_enabled() -> bool:
     import winreg
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
-            return winreg.QueryValueEx(k, "ToolDock")[0] == f'"{sys.executable}"'
+            return winreg.QueryValueEx(k, "WinTabDock")[0] == f'"{sys.executable}"'
     except OSError:
         return False
 
@@ -232,10 +232,10 @@ def set_autostart(on: bool) -> None:
     import winreg
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
         if on:
-            winreg.SetValueEx(k, "ToolDock", 0, winreg.REG_SZ, f'"{sys.executable}"')
+            winreg.SetValueEx(k, "WinTabDock", 0, winreg.REG_SZ, f'"{sys.executable}"')
         else:
             try:
-                winreg.DeleteValue(k, "ToolDock")
+                winreg.DeleteValue(k, "WinTabDock")
             except FileNotFoundError:
                 pass
 LEGACY_STATE = STATE_DIR / "state.json"  # 以前の共有の控え。--rescue でだけ扱う
@@ -256,7 +256,7 @@ def save_state(tabs: list["Tab"]) -> None:
 
 def other_docks() -> list[int]:
     """このプロセス以外で開いているドックの窓。"""
-    return [h for h in top_windows() if window_title(h) == "ToolDock" and window_pid(h) != os.getpid()]
+    return [h for h in top_windows() if window_title(h) == "WinTabDock" and window_pid(h) != os.getpid()]
 
 
 def restore_window(hwnd: int, style: int, exstyle: int, rect: tuple[int, int, int, int], owner: int = 0) -> None:
@@ -359,7 +359,7 @@ class Dock:
         self.auto_adopt = settings.get("auto_adopt", True)
         self.restore_session = settings.get("restore_session", True)
         self.session_path = session_path or STATE_DIR / "session.json"
-        # メニューで変える設定 (起動時に開くもの)。tooldock.toml は人が書くものなので、プログラムからは書き換えない
+        # メニューで変える設定 (起動時に開くもの)。wintabdock.toml は人が書くものなので、プログラムからは書き換えない
         self.prefs_path = prefs_path or STATE_DIR / "settings.json"
         self.prefs = self.load_prefs()
         self.ignored: set[int] = set()  # 「ドックから外す」で外した窓。すぐ自動で取り込み直さない
@@ -367,7 +367,7 @@ class Dock:
         self.tabs: list[Tab] = []
         self.active: Tab | None = None
         self.root = tk.Tk()
-        self.root.title("ToolDock")
+        self.root.title("WinTabDock")
         try:
             self.root.iconbitmap(default=str(RES_DIR / "assets" / "icon.ico"))  # 窓とタスクバーのアイコン
         except tk.TclError:
@@ -460,7 +460,7 @@ class Dock:
 
     @property
     def startup_mode(self) -> str:
-        # メニューで選んだもの。まだ選んでいなければ tooldock.toml の restore_session に従う
+        # メニューで選んだもの。まだ選んでいなければ wintabdock.toml の restore_session に従う
         mode = self.prefs.get("startup")
         return mode if mode in self.STARTUP_MODES else ("session" if self.restore_session else "none")
 
@@ -470,7 +470,7 @@ class Dock:
             return session.get("tabs", [])
         if self.startup_mode == "selected":
             chosen = set(self.prefs.get("startup_tools", []))
-            return [t["name"] for t in self.tools if t["name"] in chosen]  # tooldock.toml の並び
+            return [t["name"] for t in self.tools if t["name"] in chosen]  # wintabdock.toml の並び
         return []
 
     def startup(self, session: dict) -> None:
@@ -546,7 +546,7 @@ class Dock:
                     return  # 待っている間に自動取り込みがタブにした (取り込んだ窓は隠すので find_window では見えない)
                 hwnd = find_window(tree)
         if hwnd is None:
-            print(f"[ToolDock] {tool['name']} の窓が見つかりません", file=sys.stderr)
+            print(f"[WinTabDock] {tool['name']} の窓が見つかりません", file=sys.stderr)
             return
         self.adopt(tool["name"], hwnd)
 
@@ -695,7 +695,7 @@ class Dock:
             m.add_checkbutton(label="ログイン時に起動する", variable=self._autostart_var,
                               command=lambda: set_autostart(self._autostart_var.get()))
         m.add_separator()
-        m.add_command(label=f"ToolDock {__version__}", state=tk.DISABLED)  # 版の表示 (押せない)
+        m.add_command(label=f"WinTabDock {__version__}", state=tk.DISABLED)  # 版の表示 (押せない)
         return m
 
     def build_startup_menu(self, parent: tk.Menu) -> tk.Menu:
@@ -751,7 +751,7 @@ class Dock:
 
     def ask_close(self) -> None:
         win = tk.Toplevel(self.root)
-        win.title("ToolDock を閉じる")
+        win.title("WinTabDock を閉じる")
         win.transient(self.root)
         win.resizable(False, False)
         remember = tk.BooleanVar(value=False)
@@ -834,7 +834,7 @@ class Dock:
 
 def load_config() -> tuple[list[dict], dict]:
     """(ツール, 設定)。設定は auto_adopt (既定 true) と restore_session (既定 true)。"""
-    path = APP_DIR / "tooldock.toml"
+    path = APP_DIR / "wintabdock.toml"
     data = tomllib.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     return data.get("tool", []), {k: v for k, v in data.items() if k != "tool"}
 
@@ -848,7 +848,7 @@ def main() -> None:
         return
     n = rescue()  # 前回落ちたときに隠れたままの窓を戻す
     if n:
-        print(f"[ToolDock] 前回の窓を {n} 個元に戻しました")
+        print(f"[WinTabDock] 前回の窓を {n} 個元に戻しました")
     tools, settings = load_config()
     if "--selftest" not in sys.argv:
         Dock(tools, settings).root.mainloop()

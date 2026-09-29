@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
-  <!-- ToolDock のアイコン。上にタブの帯 (選んでいるタブは紫)、その下に窓の本体。
+  <!-- WinTabDock のアイコン。上にタブの帯 (選んでいるタブは紫)、その下に窓の本体。
        ICO は tools/make-icon.py でこのファイル (と icon-small.svg) から作る -->
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">

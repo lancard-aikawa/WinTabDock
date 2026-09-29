@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 """onedir ビルド定義。packaging/build.ps1 から使う。
 
-出力は dist/ToolDock/ (ToolDock.exe + _internal/)。設定 (tooldock.toml) は exe の隣に置く。
+出力は dist/WinTabDock/ (WinTabDock.exe + _internal/)。設定 (wintabdock.toml) は exe の隣に置く。
 窓なし (console=False) の 1 本だけ。試験 (selftest.py、Pillow) は入れない。
 """
 
@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(SPECPATH).parent  # noqa: F821 - SPECPATH は PyInstaller が注入する
 
 a = Analysis(  # noqa: F821
-    [str(ROOT / "tooldock.py")],
+    [str(ROOT / "wintabdock.py")],
     pathex=[str(ROOT)],
     binaries=[],
     datas=[(str(ROOT / "assets" / "icon.ico"), "assets")],
@@ -30,7 +30,7 @@ exe = EXE(  # noqa: F821
     a.scripts,
     [],
     exclude_binaries=True,
-    name="ToolDock",
+    name="WinTabDock",
     icon=str(ROOT / "assets" / "icon.ico"),
     debug=False,
     bootloader_ignore_signals=False,
@@ -47,5 +47,5 @@ coll = COLLECT(  # noqa: F821
     a.datas,
     strip=False,
     upx=False,
-    name="ToolDock",
+    name="WinTabDock",
 )

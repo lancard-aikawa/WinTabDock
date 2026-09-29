@@ -1,5 +1,5 @@
-# ToolDock の設定の見本。exe の隣に tooldock.toml という名前で置く (配布の zip には、これが tooldock.toml として入っている)。
-# 書き換えたら ToolDock を起動し直す。
+# WinTabDock の設定の見本。exe の隣に wintabdock.toml という名前で置く (配布の zip には、これが wintabdock.toml として入っている)。
+# 書き換えたら WinTabDock を起動し直す。
 
 # ドックの外で起動したツール (エクスプローラーからダブルクリックなど) も、窓が出たら自動でタブにする
 auto_adopt = true

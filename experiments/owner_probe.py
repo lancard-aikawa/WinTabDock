@@ -18,12 +18,12 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import tooldock as td  # noqa: E402
+import wintabdock as td  # noqa: E402
 
 DOCK_CHILD = r"""
 import ctypes, sys, time, tkinter as tk
 sys.path.insert(0, sys.argv[2])
-import tooldock as td
+import wintabdock as td
 ctypes.windll.shcore.SetProcessDpiAwareness(2)
 tool = int(sys.argv[1])
 r = tk.Tk(); r.title('owner-probe dock'); r.geometry('900x600+200+150'); r.configure(bg='#0d0d1a')

@@ -18,7 +18,7 @@ import sys
 import time
 from pathlib import Path
 
-import tooldock as td
+import wintabdock as td
 from selftest import count_processes, on_taskbar, windows_of
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -42,7 +42,7 @@ def close_all():
 
 busy = [t["name"] for t in tools if count_processes(t["exe"])]
 if busy or td.other_docks():
-    print(f"中止: {', '.join(busy) or 'ほかの ToolDock'} が動いています。閉じてから流してください")
+    print(f"中止: {', '.join(busy) or 'ほかの WinTabDock'} が動いています。閉じてから流してください")
     sys.exit(2)
 
 # 1. 比べるため: ドックを通さずに起動
@@ -53,7 +53,7 @@ for t in tools:
 close_all()
 
 # 2. ドックに取り込んで閉じる (session-save: 取り込み → 閉じる。ツールは元の窓に戻って動き続ける)
-out = subprocess.run([sys.executable, "tooldock.py", "--selftest", "session-save", *names], capture_output=True,
+out = subprocess.run([sys.executable, "wintabdock.py", "--selftest", "session-save", *names], capture_output=True,
                      text=True, encoding="utf-8", env=env)
 time.sleep(2)
 for t in tools:
@@ -68,7 +68,7 @@ def dock_then_check(label: str, launch_before: bool) -> None:
         for t in tools:
             subprocess.Popen([t["exe"]], cwd=str(Path(t["exe"]).parent))
         time.sleep(6)
-    dock = subprocess.Popen([sys.executable, "tooldock.py", "--selftest", "adopt-quit", *names], stdout=subprocess.PIPE,
+    dock = subprocess.Popen([sys.executable, "wintabdock.py", "--selftest", "adopt-quit", *names], stdout=subprocess.PIPE,
                             text=True, encoding="utf-8", env=env)
     if not launch_before:
         time.sleep(3)  # ドックが開いてから、ドックの外で起動する

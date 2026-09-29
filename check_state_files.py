@@ -11,7 +11,7 @@ import json
 import os
 import sys
 
-import tooldock as td
+import wintabdock as td
 
 sys.stdout.reconfigure(encoding="utf-8")
 td.STATE_DIR.mkdir(parents=True, exist_ok=True)

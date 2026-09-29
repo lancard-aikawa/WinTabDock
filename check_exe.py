@@ -1,12 +1,12 @@
 # /// script
 # requires-python = ">=3.11"
 # ///
-"""ビルドした exe (dist/ToolDock/ToolDock.exe) を動かして確かめる。
+"""ビルドした exe (dist/WinTabDock/WinTabDock.exe) を動かして確かめる。
 
     uv run check_exe.py
 
 人の環境に触れないよう、exe を一時フォルダにコピーし、PortWho と RepoTether だけを登録した設定で動かす。
-控えと前回のタブは TOOLDOCK_HOME で一時フォルダへ向ける。確かめること:
+控えと前回のタブは WINTABDOCK_HOME で一時フォルダへ向ける。確かめること:
   1. exe が起動し、窓とタスクバーにアイコンが付いている
   2. ドックの外で起動した PortWho を自動で取り込む (所有者がドックになる)
   3. ドックを閉じると PortWho が元の窓に戻り、前回のタブが一時フォルダに保存される
@@ -22,7 +22,7 @@ import tempfile
 import time
 from pathlib import Path
 
-import tooldock as td
+import wintabdock as td
 
 sys.stdout.reconfigure(encoding="utf-8")
 td.ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -55,17 +55,17 @@ def wait(cond, timeout=15):
 # 人が使っているものに触れない
 busy = [t["name"] for t in (portwho, repotether) if running(t["exe"])]
 if busy or td.other_docks():
-    print(f"中止: {', '.join(busy) or 'ほかの ToolDock'} が動いています。閉じてから流してください")
+    print(f"中止: {', '.join(busy) or 'ほかの WinTabDock'} が動いています。閉じてから流してください")
     sys.exit(2)
 
-work = Path(tempfile.mkdtemp(prefix="tooldock-exe-"))
-app = work / "ToolDock"
-shutil.copytree(ROOT / "dist" / "ToolDock", app)
-(app / "tooldock.toml").write_text(
+work = Path(tempfile.mkdtemp(prefix="wintabdock-exe-"))
+app = work / "WinTabDock"
+shutil.copytree(ROOT / "dist" / "WinTabDock", app)
+(app / "wintabdock.toml").write_text(
     "auto_adopt = true\nrestore_session = true\n\n"
     f'[[tool]]\nname = "PortWho"\nexe = "{portwho["exe"]}"\n\n'
     f'[[tool]]\nname = "RepoTether"\nexe = "{repotether["exe"]}"\n', encoding="utf-8")
-env = {**os.environ, "TOOLDOCK_HOME": str(work / "home")}
+env = {**os.environ, "WINTABDOCK_HOME": str(work / "home")}
 # ドックの × を「元の窓に戻して残す」にしておく。既定の「毎回たずねる」だと、閉じるメッセージを送っても
 # たずねる画面で止まり、ドックも取り込んだ PortWho も残った
 (work / "home").mkdir(parents=True, exist_ok=True)
@@ -75,9 +75,9 @@ env = {**os.environ, "TOOLDOCK_HOME": str(work / "home")}
 def kill_test_exes() -> None:
     """一時フォルダの exe (この試験が起動したドック) を、途中で失敗しても必ず止める。"""
     for p in td.all_pids():
-        if os.path.normcase(td.process_path(p)) == os.path.normcase(str(app / "ToolDock.exe")):
+        if os.path.normcase(td.process_path(p)) == os.path.normcase(str(app / "WinTabDock.exe")):
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(p)], capture_output=True)
-exe = str(app / "ToolDock.exe")
+exe = str(app / "WinTabDock.exe")
 
 
 def dock_window():
@@ -131,7 +131,7 @@ check(adopted and not td.user32.GetWindow(adopted, td.GW_OWNER) and style & td.W
       "ドックを閉じると PortWho は元の窓に戻った")
 session = work / "home" / "session.json"
 saved = td.json.loads(session.read_text(encoding="utf-8")) if session.exists() else {}
-check(saved.get("tabs") == ["PortWho"], f"前回のタブが TOOLDOCK_HOME に保存された ({saved})")
+check(saved.get("tabs") == ["PortWho"], f"前回のタブが WINTABDOCK_HOME に保存された ({saved})")
 
 dock_proc = subprocess.Popen([exe], env=env)
 dock = wait(dock_window)
@@ -147,7 +147,7 @@ import winreg  # noqa: E402
 
 try:
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, td.RUN_KEY) as k:
-        had = winreg.QueryValueEx(k, "ToolDock")[0]
+        had = winreg.QueryValueEx(k, "WinTabDock")[0]
 except OSError:
     pass
 if had is None:

@@ -18,7 +18,7 @@ import os
 import subprocess
 import sys
 
-import tooldock as td
+import wintabdock as td
 
 sys.stdout.reconfigure(encoding="utf-8")
 env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
@@ -36,7 +36,7 @@ for label, pref, expected in cases:
     td.STATE_DIR.mkdir(parents=True, exist_ok=True)
     session.write_text(json.dumps({"tabs": [second], "active": second}), encoding="utf-8")
     prefs.write_text(json.dumps(pref), encoding="utf-8")
-    out = subprocess.run([sys.executable, "tooldock.py", "--selftest", "startup-check", first, second],
+    out = subprocess.run([sys.executable, "wintabdock.py", "--selftest", "startup-check", first, second],
                          capture_output=True, text=True, encoding="utf-8", env=env)
     lines = dict(line.split(" ", 1) for line in out.stdout.splitlines() if line.startswith(("TABS ", "COUNTS ", "中止")))
     if "中止" in out.stdout or "TABS" not in lines:

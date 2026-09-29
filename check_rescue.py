@@ -16,11 +16,11 @@ import subprocess
 import sys
 import time
 
-import tooldock as td
+import wintabdock as td
 
 sys.stdout.reconfigure(encoding="utf-8")
 name = sys.argv[1]
-out = subprocess.run([sys.executable, "tooldock.py", "--selftest", "crash", name], capture_output=True, text=True,
+out = subprocess.run([sys.executable, "wintabdock.py", "--selftest", "crash", name], capture_output=True, text=True,
                      encoding="utf-8", env={**td.os.environ, "PYTHONIOENCODING": "utf-8"})
 lines = dict(line.split(" ", 1) for line in out.stdout.splitlines() if line.startswith(("HWND ", "PID ")))
 if "HWND" not in lines:

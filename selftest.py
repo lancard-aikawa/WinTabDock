@@ -1,4 +1,4 @@
-"""ToolDock の自動確認。tooldock.py --selftest <ツール名...> から呼ばれる。
+"""WinTabDock の自動確認。wintabdock.py --selftest <ツール名...> から呼ばれる。
 
 実際にツールを起動して取り込み、Win32 から見た状態 (枠・タスクバー・位置・表示) を確かめる。
 ドックの範囲だけを docs/ に撮る。最後に取り込んだツールは閉じる (このテストが起動したものだけ)。
@@ -17,7 +17,7 @@ from pathlib import Path
 
 from PIL import ImageGrab
 
-import tooldock as td
+import wintabdock as td
 
 DOCS = Path(__file__).with_name("docs")
 # 「別のアプリ」の役。ドックの左上に重なる位置に出す
@@ -133,7 +133,7 @@ def guard(tools: list[dict]) -> str | None:
     if running:
         return f"{', '.join(running)} が起動中です。閉じてから流してください (試験はそれを取り込んで最後に閉じる)"
     if td.other_docks():
-        return "ほかの ToolDock が開いています。閉じてから流してください"
+        return "ほかの WinTabDock が開いています。閉じてから流してください"
     return None
 
 
@@ -149,7 +149,7 @@ def run(dock: td.Dock, args: list[str]) -> None:
     tools = dock.tools  # main が試験の対象だけに絞ってある
     # session-restore は、直前の session-save が起動して残したツールを取り込むのが試験の中身なので、起動中でよい
     reason = guard(tools) if mode not in ("session-restore", "adopt-quit") else (
-        "ほかの ToolDock が開いています。閉じてから流してください" if td.other_docks() else None)
+        "ほかの WinTabDock が開いています。閉じてから流してください" if td.other_docks() else None)
     if reason:
         print(f"中止: {reason}", flush=True)
         os._exit(2)  # まだ何も取り込んでいない
@@ -228,9 +228,9 @@ def session_restore_steps(dock: td.Dock, tools: list[dict]):
 
 
 def close_check_steps(dock: td.Dock, tools: list[dict]):
-    """ドックの × を押したときの動き。TOOLDOCK_CLOSE_CASE で場合を選ぶ (判定は check_close.py)。
+    """ドックの × を押したときの動き。WINTABDOCK_CLOSE_CASE で場合を選ぶ (判定は check_close.py)。
     close / keep / ask-close / ask-keep (次からたずねない) / ask-cancel / close-stubborn (× を無視するアプリ入り)"""
-    case = os.environ["TOOLDOCK_CLOSE_CASE"]
+    case = os.environ["WINTABDOCK_CLOSE_CASE"]
     for tool in tools:
         dock.launch(tool)
         yield 800
@@ -346,7 +346,7 @@ def steps_all(dock: td.Dock, tools: list[dict]):
                 sm.entrycget(i, "state") if sm.type(i) == "checkbutton" else "") for i in range(sm.index("end") + 1)]
     radios = [e[1] for e in entries if e[0] == "radiobutton"]
     checks_ = [e for e in entries if e[0] == "checkbutton"]
-    # まだ選んでいないときの既定は tooldock.toml の restore_session に従う (人の設定では true → 前回開いていたもの。
+    # まだ選んでいないときの既定は wintabdock.toml の restore_session に従う (人の設定では true → 前回開いていたもの。
     # 試験のドックは前回のタブに左右されないよう false で動かすので、何も開かない)
     default = "session" if dock.restore_session else "none"
     check(radios == ["前回開いていたもの", "選んだものだけ", "何も開かない"] and dock.startup_mode == default
@@ -402,7 +402,7 @@ def steps_all(dock: td.Dock, tools: list[dict]):
 
     # ドックの右下の角を本物のマウスでドラッグして大きさを変える
     fx, fy, fw, fh = frame_rect(dock.hwnd)
-    if os.environ.get("TOOLDOCK_DEBUG"):
+    if os.environ.get("WINTABDOCK_DEBUG"):
         names = {dock.hwnd: "dock", a.hwnd: a.name, b.hwnd: b.name}
         for label, (px, py) in {"外側 +3": (fx + fw + 3, fy + fh + 3), "内側 -2": (fx + fw - 2, fy + fh - 2)}.items():
             at = top_at(px, py)
