@@ -95,10 +95,28 @@ def shot(dock: td.Dock, name: str) -> None:
     ImageGrab.grab(bbox=(x, y, x + w, y + h), all_screens=True).save(DOCS / name)
 
 
+def guard(tools: list[dict]) -> str | None:
+    """試験を始めてよいか。人が使っているツールやドックに手を出さないため。
+
+    試験の「起動」は起動中の窓があれば取り込み、最後に閉じる。対象のツールを人が使っていたとき、
+    それを取り込んで閉じてしまった (RepoTether と PortWho)。
+    """
+    running = [t["name"] for t in tools if count_processes(t["exe"])]
+    if running:
+        return f"{', '.join(running)} が起動中です。閉じてから流してください (試験はそれを取り込んで最後に閉じる)"
+    if td.other_docks():
+        return "ほかの ToolDock が開いています。閉じてから流してください"
+    return None
+
+
 def run(dock: td.Dock, args: list[str]) -> None:
     crash = args[:1] == ["crash"]
     names = args[1:] if crash else args
     tools = [t for t in dock.tools if t["name"] in names]
+    reason = guard(tools)
+    if reason:
+        print(f"中止: {reason}", flush=True)
+        os._exit(2)  # まだ何も取り込んでいない
     steps = (crash_steps if crash else steps_all)(dock, tools)
 
     def tick():
@@ -117,6 +135,7 @@ def crash_steps(dock: td.Dock, tools: list[dict]):
     t = dock.tabs[0]
     check(td.STATE.exists(), f"取り込んだ窓を state.json に控えた (hwnd={t.hwnd})")
     print(f"HWND {t.hwnd}", flush=True)
+    print(f"PID {os.getpid()}", flush=True)
     os._exit(3)  # 後片付けをせずに落ちる
     yield 0
 

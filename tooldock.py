@@ -199,13 +199,28 @@ def find_window(pids: set[int], exe: str | None = None) -> int | None:
 
 # ── 取り込んだ窓の控え (ドックが落ちても戻せるように) ─────────────────────────
 
-STATE = Path(os.environ.get("LOCALAPPDATA", ".")) / "ToolDock" / "state.json"
+# 控えはドック (プロセス) ごとに分ける。1 つのファイルを共有していたとき、試験で開いた 2 つ目のドックが
+# 動いている方のドックの控えを「前回落ちたもの」と取り違え、その窓を元に戻したうえで控えを消した
+STATE_DIR = Path(os.environ.get("LOCALAPPDATA", ".")) / "ToolDock"
+LEGACY_STATE = STATE_DIR / "state.json"  # 以前の共有の控え。--rescue でだけ扱う
+
+
+def state_path(pid: int | None = None) -> Path:
+    return STATE_DIR / f"state-{pid or os.getpid()}.json"
+
+
+STATE = state_path()  # このドックの控え
 
 
 def save_state(tabs: list["Tab"]) -> None:
     STATE.parent.mkdir(parents=True, exist_ok=True)
     STATE.write_text(json.dumps([{"hwnd": t.hwnd, "style": t.style, "exstyle": t.exstyle, "rect": t.rect,
                                   "owner": t.owner} for t in tabs]), encoding="utf-8")
+
+
+def other_docks() -> list[int]:
+    """このプロセス以外で開いているドックの窓。"""
+    return [h for h in top_windows() if window_title(h) == "ToolDock" and window_pid(h) != os.getpid()]
 
 
 def restore_window(hwnd: int, style: int, exstyle: int, rect: tuple[int, int, int, int], owner: int = 0) -> None:
@@ -220,15 +235,29 @@ def restore_window(hwnd: int, style: int, exstyle: int, rect: tuple[int, int, in
     user32.ShowWindow(hwnd, SW_SHOW)
 
 
-def rescue() -> int:
-    if not STATE.exists():
-        return 0
+def _restore_file(path: Path) -> int:
     n = 0
-    for s in json.loads(STATE.read_text(encoding="utf-8")):
+    for s in json.loads(path.read_text(encoding="utf-8")):
         if user32.IsWindow(s["hwnd"]):
             restore_window(s["hwnd"], s["style"], s["exstyle"], tuple(s["rect"]), s.get("owner", 0))
             n += 1
-    STATE.unlink()
+    path.unlink()
+    return n
+
+
+def rescue(include_legacy: bool = False) -> int:
+    """もう動いていないドックの控えから窓を戻す。動いているドックの控えには触らない。"""
+    if not STATE_DIR.exists():
+        return 0
+    alive = set(all_pids())
+    n = 0
+    for path in STATE_DIR.glob("state-*.json"):
+        pid = int(path.stem.split("-", 1)[1]) if path.stem.split("-", 1)[1].isdigit() else 0
+        if pid and pid not in alive:
+            n += _restore_file(path)
+    # 以前の共有の控えは、どのドックのものか分からない。ほかにドックが開いていないときに、明示されたらだけ戻す
+    if include_legacy and LEGACY_STATE.exists() and not other_docks():
+        n += _restore_file(LEGACY_STATE)
     return n
 
 
@@ -457,7 +486,7 @@ def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8")
     ctypes.windll.shcore.SetProcessDpiAwareness(2)  # 座標を物理ピクセルでそろえる (相手の窓と合わせるため)
     if "--rescue" in sys.argv:
-        print(f"{rescue()} 個の窓を元に戻しました")
+        print(f"{rescue(include_legacy=True)} 個の窓を元に戻しました")
         return
     n = rescue()  # 前回落ちたときに隠れたままの窓を戻す
     if n:
