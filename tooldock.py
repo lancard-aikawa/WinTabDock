@@ -411,13 +411,13 @@ class Dock:
 
     # ── メニュー ──
     def show_menu(self) -> None:
+        self.build_menu().tk_popup(self.root.winfo_rootx() + self.root.winfo_width() - 200, self.bar.winfo_rooty() + 36)
+
+    def build_menu(self) -> tk.Menu:
         m = tk.Menu(self.root, tearoff=False)
         for tool in self.tools:
-            if self.tab_of_exe(tool["exe"]):
-                m.add_command(label=f"{tool['name']} に切り替え", command=lambda t=tool: self.launch(t))
-                m.add_command(label=f"{tool['name']} をもう 1 つ起動", command=lambda t=tool: self.launch(t, new=True))
-            else:
-                m.add_command(label=f"起動: {tool['name']}", command=lambda t=tool: self.launch(t))
+            label = f"{tool['name']} に切り替え" if self.tab_of_exe(tool["exe"]) else f"起動: {tool['name']}"
+            m.add_command(label=label, command=lambda t=tool: self.launch(t))
         m.add_separator()
         sub = tk.Menu(m, tearoff=False)
         mine = {t.hwnd for t in self.tabs} | {self.hwnd}
@@ -426,7 +426,13 @@ class Dock:
                 title = window_title(hwnd)
                 sub.add_command(label=title[:60], command=lambda h=hwnd, n=title: self.adopt(n[:20], h))
         m.add_cascade(label="起動中の窓を取り込む", menu=sub)
-        m.tk_popup(self.root.winfo_rootx() + self.root.winfo_width() - 200, self.bar.winfo_rooty() + 36)
+        # 2 つ目を起動することはまれなので、ふだんの項目と分けて一番下に置く
+        m.add_separator()
+        again = tk.Menu(m, tearoff=False)
+        for tool in self.tools:
+            again.add_command(label=tool["name"], command=lambda t=tool: self.launch(t, new=True))
+        m.add_cascade(label="もう 1 つ起動", menu=again)
+        return m
 
     def tab_menu(self, event, tab: Tab) -> None:
         m = tk.Menu(self.root, tearoff=False)

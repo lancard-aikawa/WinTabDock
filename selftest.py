@@ -135,6 +135,13 @@ def steps_all(dock: td.Dock, tools: list[dict]):
     check(count_processes(exe) == before and len(dock.tabs) == len(tools),
           f"取り込み済みの {tools[0]['name']} をもう一度起動しても、2 つ目は起動しない (プロセス {before} → {count_processes(exe)})")
     check(dock.active and dock.active.name == tools[0]["name"], "そのタブに切り替わる")
+
+    # メニュー: ふだんの項目 (起動 / 切り替え) が上、「もう 1 つ起動」は一番下のサブメニューだけ
+    m = dock.build_menu()
+    labels = [m.entrycget(i, "label") if m.type(i) != "separator" else "---" for i in range(m.index("end") + 1)]
+    check(labels[-1] == "もう 1 つ起動" and not any("もう 1 つ" in s for s in labels[:-1]),
+          f"「もう 1 つ起動」はふだんの項目と分けて一番下にある {labels}")
+    check(f"{tools[0]['name']} に切り替え" in labels, "取り込み済みのツールは「切り替え」になっている")
     last = dock.tabs[-1].button  # 以降は最後のタブが選ばれている前提。本物のクリックで選び直す
     click(last.winfo_rootx() + last.winfo_width() // 2, last.winfo_rooty() + last.winfo_height() // 2)
     yield 700
