@@ -49,16 +49,26 @@ def count_processes(exe: str) -> int:
     return sum(1 for pid in td.all_pids() if os.path.normcase(td.process_path(pid)) == os.path.normcase(exe))
 
 
-def drag(x0: int, y0: int, x1: int, y1: int) -> None:
-    """本物のマウスでドラッグする。別スレッドから呼ぶ (枠のドラッグ中は Windows のサイズ変更ループが Tk を止める)。"""
+def drag(x0: int, y0: int, x1: int, y1: int, probe=None) -> None:
+    """本物のマウスでドラッグする。別スレッドから呼ぶ (枠のドラッグ中は Windows のサイズ変更ループが Tk を止める)。
+    probe はドラッグの途中 (ボタンを押したまま) で呼ぶ。"""
     td.user32.SetCursorPos(x0, y0)
     time.sleep(0.2)
     td.user32.mouse_event(0x0002, 0, 0, 0, 0)
     for i in range(1, 11):
         time.sleep(0.03)
         td.user32.SetCursorPos(x0 + (x1 - x0) * i // 10, y0 + (y1 - y0) * i // 10)
+        if i == 5 and probe:
+            time.sleep(0.3)
+            probe()
     time.sleep(0.2)
     td.user32.mouse_event(0x0004, 0, 0, 0, 0)
+
+
+def tool_visible_now(dock_hwnd: int, tool_hwnd: int, out: list) -> None:
+    """別スレッドから: ドックの見えている枠の中ほど (本体) で、いちばん手前がツールか。Tk は触らない。"""
+    x, y, w, h = frame_rect(dock_hwnd)
+    out.append(top_at(x + w // 2, y + h * 2 // 3) == tool_hwnd)
 
 
 def frame_rect(hwnd: int) -> tuple[int, int, int, int]:
@@ -171,14 +181,42 @@ def steps_all(dock: td.Dock, tools: list[dict]):
 
     # タイトルバーを本物のマウスでドラッグして動かす
     fx, fy, fw, fh = frame_rect(dock.hwnd)
-    t = threading.Thread(target=drag, args=(fx + fw // 2, fy + 12, fx + fw // 2 + 120, fy + 12 + 80))
+    during: list[bool] = []
+    t = threading.Thread(target=drag, args=(fx + fw // 2, fy + 12, fx + fw // 2 + 120, fy + 12 + 80,
+                                            lambda: tool_visible_now(dock.hwnd, b.hwnd, during)))
     t.start()
     while t.is_alive():
         yield 100
     yield 600
     nx, ny, _, _ = frame_rect(dock.hwnd)
     check(abs(nx - fx - 120) <= 4 and abs(ny - fy - 80) <= 4, f"タイトルバーをドラッグするとドックが動く ({fx},{fy} → {nx},{ny})")
+    check(during == [True], "ドラッグしている間もツールが見えている (本体が真っ暗にならない)")
     check(near(td.rect_of(b.hwnd), dock.body_rect()) and on_top(dock, b.hwnd), "ツールの窓も動いた先についてくる")
+
+    # 「+ 起動 / 取り込む」を押している間と、開いたメニューを閉じたあとも、ツールが見えている
+    btn = dock.menu_button
+    bx0, by0 = btn.winfo_rootx() + btn.winfo_width() // 2, btn.winfo_rooty() + btn.winfo_height() // 2
+    pressed: list[bool] = []
+
+    def press_menu_button():
+        td.user32.SetCursorPos(bx0, by0)
+        time.sleep(0.2)
+        td.user32.mouse_event(0x0002, 0, 0, 0, 0)
+        time.sleep(0.4)
+        tool_visible_now(dock.hwnd, b.hwnd, pressed)
+        td.user32.mouse_event(0x0004, 0, 0, 0, 0)
+        time.sleep(0.8)
+        tool_visible_now(dock.hwnd, b.hwnd, pressed)  # メニューが開いている間
+        td.user32.keybd_event(0x1B, 0, 0, 0)  # Esc でメニューを閉じる
+        td.user32.keybd_event(0x1B, 0, 2, 0)
+
+    t = threading.Thread(target=press_menu_button)
+    t.start()
+    while t.is_alive():
+        yield 100
+    yield 500
+    check(pressed == [True, True], f"「+ 起動 / 取り込む」を押している間もメニューを開いている間もツールが見えている ({pressed})")
+    check(on_top(dock, b.hwnd), "メニューを閉じたあともツールが見えている")
 
     dock.root.geometry("900x600+300+200")
     yield 600

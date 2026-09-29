@@ -9,9 +9,10 @@
     uv run tooldock.py --selftest LPortMan PortWho   # 自動の確認 (docs/ に画像を書く)
 
 仕組み (仮想タブ): 相手の窓はトップレベルのまま、枠のタイトル・縁を外してドックの本体の上に重ねる。
-選んでいないタブの窓は隠し、タスクバーのボタンは WS_EX_TOOLWINDOW で消す。
-窓の所有者 (owner) は変えない。変えるとドックが終わるときに相手の窓まで壊れるおそれがある。
-取り込んだ窓の元の状態は state.json に控え、ドックが落ちても次の起動か --rescue で戻す。
+窓の所有者 (owner) をドックにするので、Windows が常にツールをドックより手前に置き、最小化も一緒になり、
+タスクバーのボタンも出ない。選んでいないタブの窓は隠す。
+取り込んだ窓の元の状態は state.json に控え、ドックが落ちても次の起動か --rescue で戻す
+(ドックが落ちても、所有者が外れるだけで相手の窓とプロセスは残る。experiments/owner_probe.py で確認)。
 """
 
 from __future__ import annotations
@@ -19,10 +20,8 @@ from __future__ import annotations
 import ctypes
 import json
 import os
-import queue
 import subprocess
 import sys
-import threading
 import time
 import tkinter as tk
 import tomllib
@@ -35,7 +34,7 @@ from pathlib import Path
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
-GWL_STYLE, GWL_EXSTYLE = -16, -20
+GWL_STYLE, GWL_EXSTYLE, GWLP_HWNDPARENT = -16, -20, -8  # トップレベルの窓では HWNDPARENT が所有者
 WS_CAPTION, WS_THICKFRAME = 0x00C00000, 0x00040000
 WS_MINIMIZEBOX, WS_MAXIMIZEBOX, WS_SYSMENU = 0x00020000, 0x00010000, 0x00080000
 WS_EX_TOOLWINDOW, WS_EX_APPWINDOW = 0x00000080, 0x00040000
@@ -76,6 +75,7 @@ user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, w
 user32.GetAsyncKeyState.restype = ctypes.c_short
 user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
 VK_LBUTTON = 0x01
+user32.keybd_event.argtypes = [wintypes.BYTE, wintypes.BYTE, wintypes.DWORD, ctypes.c_size_t]
 user32.GetForegroundWindow.restype = wintypes.HWND
 user32.SetForegroundWindow.argtypes = [wintypes.HWND]
 
@@ -204,14 +204,15 @@ STATE = Path(os.environ.get("LOCALAPPDATA", ".")) / "ToolDock" / "state.json"
 
 def save_state(tabs: list["Tab"]) -> None:
     STATE.parent.mkdir(parents=True, exist_ok=True)
-    STATE.write_text(json.dumps([{"hwnd": t.hwnd, "style": t.style, "exstyle": t.exstyle, "rect": t.rect}
-                                 for t in tabs]), encoding="utf-8")
+    STATE.write_text(json.dumps([{"hwnd": t.hwnd, "style": t.style, "exstyle": t.exstyle, "rect": t.rect,
+                                  "owner": t.owner} for t in tabs]), encoding="utf-8")
 
 
-def restore_window(hwnd: int, style: int, exstyle: int, rect: tuple[int, int, int, int]) -> None:
+def restore_window(hwnd: int, style: int, exstyle: int, rect: tuple[int, int, int, int], owner: int = 0) -> None:
     if not user32.IsWindow(hwnd):
         return
     user32.ShowWindow(hwnd, SW_HIDE)  # 拡張スタイルの変更をタスクバーに反映させるため、一度隠す
+    user32.SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner)
     user32.SetWindowLongPtrW(hwnd, GWL_STYLE, style)
     user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, exstyle)
     x, y, w, h = rect
@@ -225,7 +226,7 @@ def rescue() -> int:
     n = 0
     for s in json.loads(STATE.read_text(encoding="utf-8")):
         if user32.IsWindow(s["hwnd"]):
-            restore_window(s["hwnd"], s["style"], s["exstyle"], tuple(s["rect"]))
+            restore_window(s["hwnd"], s["style"], s["exstyle"], tuple(s["rect"]), s.get("owner", 0))
             n += 1
     STATE.unlink()
     return n
@@ -243,6 +244,7 @@ class Tab:
     rect: tuple[int, int, int, int]
     button: tk.Button | None = None
     exe: str = ""  # normcase 済み。同じツールの二重起動を避けるため
+    owner: int = 0  # 取り込む前の所有者 (ふつうは 0)
 
 
 TAB_BG, TAB_ACTIVE, TAB_FG, TAB_FG_DIM, BAR_BG = "#252542", "#7c3aed", "#ffffff", "#9a9ab8", "#1a1a2e"
@@ -261,8 +263,9 @@ class Dock:
         self.bar.pack(side=tk.TOP, fill=tk.X)
         self.tabs_frame = tk.Frame(self.bar, bg=BAR_BG)
         self.tabs_frame.pack(side=tk.LEFT, fill=tk.Y)
-        tk.Button(self.bar, text="+ 起動 / 取り込む", command=self.show_menu, bg=TAB_BG, fg=TAB_FG, relief=tk.FLAT,
-                  activebackground=TAB_ACTIVE, padx=10).pack(side=tk.RIGHT, padx=6, pady=4)
+        self.menu_button = tk.Button(self.bar, text="+ 起動 / 取り込む", command=self.show_menu, bg=TAB_BG, fg=TAB_FG,
+                                     relief=tk.FLAT, activebackground=TAB_ACTIVE, padx=10)
+        self.menu_button.pack(side=tk.RIGHT, padx=6, pady=4)
         self.body = tk.Frame(self.root, bg="#0d0d1a")
         self.body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         self.empty = tk.Label(self.body, text="右上の「+ 起動 / 取り込む」からツールを開きます",
@@ -273,33 +276,7 @@ class Dock:
         self.root.bind("<Unmap>", lambda e: self.on_minimize() if e.widget is self.root else None)
         self.root.bind("<Map>", lambda e: self.on_restore() if e.widget is self.root else None)
         self._layout_pending = False
-        # 前景の窓が変わったら重なり順を直す (ツールをクリック → ドックをその直下へ / ドック → ツールを上へ)。
-        # フックは別スレッドで受ける。tkinter の mainloop 中に同じスレッドで ctypes のコールバックが走ると
-        # 「PyEval_RestoreThread: the GIL is released」で Python ごと落ちる
-        self._fg: queue.SimpleQueue[int] = queue.SimpleQueue()
-        self._hook_thread_id = 0
-        threading.Thread(target=self._hook_loop, daemon=True).start()
-        self.root.after(30, self._drain_foreground)
         self.root.after(500, self.poll)
-
-    def _hook_loop(self) -> None:
-        self._hook_thread_id = kernel32.GetCurrentThreadId()
-        proc = WINEVENTPROC(lambda _h, _e, hwnd, *_: self._fg.put(hwnd or 0))
-        hook = user32.SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, None, proc, 0, 0,
-                                      WINEVENT_OUTOFCONTEXT)
-        msg = wintypes.MSG()
-        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-            user32.TranslateMessage(ctypes.byref(msg))
-            user32.DispatchMessageW(ctypes.byref(msg))
-        user32.UnhookWinEvent(hook)
-
-    def _drain_foreground(self) -> None:
-        last = None
-        while not self._fg.empty():
-            last = self._fg.get()
-        if last:
-            self.on_foreground(last)
-        self.root.after(30, self._drain_foreground)
 
     @property
     def hwnd(self) -> int:
@@ -342,10 +319,14 @@ class Dock:
             user32.ShowWindow(hwnd, SW_RESTORE)
         style = user32.GetWindowLongPtrW(hwnd, GWL_STYLE)
         exstyle = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
-        tab = Tab(name, hwnd, style, exstyle, rect_of(hwnd), exe=os.path.normcase(process_path(window_pid(hwnd))))
+        tab = Tab(name, hwnd, style, exstyle, rect_of(hwnd), exe=os.path.normcase(process_path(window_pid(hwnd))),
+                  owner=user32.GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT))
         self.tabs.append(tab)
         save_state(self.tabs)  # 変える前に控える
         user32.ShowWindow(hwnd, SW_HIDE)
+        # 所有者をドックにする。前面の奪い合いで重なり順を直す作りでは、ドックを押した瞬間 (移動・リサイズ・
+        # ボタン) に本体が真っ暗になり、他のアプリの後ろにも回った。所有される窓は Windows が所有者より手前に置く
+        user32.SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, self.hwnd)
         user32.SetWindowLongPtrW(hwnd, GWL_STYLE, style & ~(WS_CAPTION | WS_THICKFRAME))
         user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (exstyle | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW)
         user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED)
@@ -358,7 +339,7 @@ class Dock:
         self.select(tab)
 
     def release(self, tab: Tab) -> None:
-        restore_window(tab.hwnd, tab.style, tab.exstyle, tab.rect)
+        restore_window(tab.hwnd, tab.style, tab.exstyle, tab.rect, tab.owner)
         self.forget(tab)
 
     def forget(self, tab: Tab) -> None:
@@ -395,34 +376,15 @@ class Dock:
         if not self.active:
             return
         x, y, w, h = self.body_rect()
-        # 位置と大きさだけ合わせる。重なり順は raise_group() に任せる
         user32.SetWindowPos(self.active.hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE)
         if show:
             user32.ShowWindow(self.active.hwnd, SW_SHOWNOACTIVATE)
-            self.raise_group()
-
-    def raise_group(self) -> None:
-        """ドックとツールを、ツールが上・ドックがその直下になるように前へ出す。
-
-        別プロセスの窓は HWND_TOP で上げようとしても、前面の窓より上には上がらないことがある
-        (ドックのタイトルバーで戻ると、ツールが他のアプリの後ろに残った)。前面にいるプロセスからの
-        SetForegroundWindow は許されるので、ドックが前面ならツールを前面にする。ツールが前面になると
-        on_foreground が呼ばれ、ドックをその直下へ付ける。ツールが後ろにあるうちにドックを下げてはいけない
-        (ドックまで他のアプリの後ろに回る)
-        """
-        if not self.active:
-            return
-        fg = user32.GetForegroundWindow()
-        if fg == self.active.hwnd:
-            user32.SetWindowPos(self.hwnd, self.active.hwnd, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
-        elif fg == self.hwnd or any(t.hwnd == fg for t in self.tabs):
-            # ドックか、切り替える前のタブ (いまは隠れている) が前面 → 今のツールを前面にする。
-            # ただしマウスのボタンが押されている間は待つ。ドックの枠やタイトルバーをつかんだ瞬間に前面を
-            # ツールへ移すと、始まったばかりのリサイズ・移動が取り消される (枠をドラッグしても大きさが変わらなかった)
-            if user32.GetAsyncKeyState(VK_LBUTTON) & 0x8000:
-                self.root.after(100, self.raise_group)
-                return
-            user32.SetForegroundWindow(self.active.hwnd)
+            # 所有者を付け替えた直後や、隠していた窓を出した直後は、Windows がまだ重なり順を組み直していない
+            # (実験では、ドックの重なり順を一度動かすとツールが手前に来た)
+            user32.SetWindowPos(self.hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+            if user32.GetForegroundWindow() == self.hwnd:
+                # 人がドックを操作した直後なら、キー入力がツールに届くようにする (前面のプロセスからなら許される)
+                user32.SetForegroundWindow(self.active.hwnd)
 
     def after_layout(self) -> None:
         if not self._layout_pending:
@@ -440,13 +402,6 @@ class Dock:
 
     def on_restore(self) -> None:
         self.place_active(show=True)
-
-    def on_foreground(self, hwnd: int) -> None:
-        if not self.active or not hwnd:
-            return
-        if hwnd in (self.hwnd, self.active.hwnd):
-            # ツールが前に来た → ドックをその直下へ / ドックが前に来た → ツールを前面にする
-            self.raise_group()
 
     def poll(self) -> None:
         for t in list(self.tabs):
@@ -484,8 +439,6 @@ class Dock:
             self.release(t)
         if STATE.exists():
             STATE.unlink()
-        if self._hook_thread_id:
-            user32.PostThreadMessageW(self._hook_thread_id, WM_QUIT, 0, 0)
         self.root.destroy()
 
 
