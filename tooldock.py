@@ -20,8 +20,10 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import queue
 import subprocess
 import sys
+import threading
 import time
 import tkinter as tk
 import tomllib
@@ -95,6 +97,9 @@ user32.UnhookWinEvent.argtypes = [wintypes.HANDLE]
 user32.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT]
 user32.PostThreadMessageW.argtypes = [wintypes.DWORD, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 WM_QUIT = 0x0012
+EVENT_OBJECT_SHOW = 0x8002
+OBJID_WINDOW = 0
+WINEVENT_SKIPOWNPROCESS = 0x0002
 WINEVENTPROC = ctypes.WINFUNCTYPE(None, wintypes.HANDLE, wintypes.DWORD, wintypes.HWND,
                                   wintypes.LONG, wintypes.LONG, wintypes.DWORD, wintypes.DWORD)
 user32.SetWinEventHook.restype = wintypes.HANDLE
@@ -274,19 +279,27 @@ class Tab:
     button: tk.Button | None = None
     exe: str = ""  # normcase 済み。同じツールの二重起動を避けるため
     owner: int = 0  # 取り込む前の所有者 (ふつうは 0)
+    pid: int = 0  # 窓のプロセス。自動取り込みで、同じプロセスの 2 つ目の窓 (設定画面など) をタブにしないため
 
 
 TAB_BG, TAB_ACTIVE, TAB_FG, TAB_FG_DIM, BAR_BG = "#252542", "#7c3aed", "#ffffff", "#9a9ab8", "#1a1a2e"
 
 
 class Dock:
-    def __init__(self, tools: list[dict]):
+    def __init__(self, tools: list[dict], settings: dict | None = None, session_path: Path | None = None):
+        settings = settings or {}
         self.tools = tools
+        self.auto_adopt = settings.get("auto_adopt", True)
+        self.restore_session = settings.get("restore_session", True)
+        self.session_path = session_path or STATE_DIR / "session.json"
+        self.ignored: set[int] = set()  # 「ドックから外す」で外した窓。すぐ自動で取り込み直さない
+        self._closing = False
         self.tabs: list[Tab] = []
         self.active: Tab | None = None
         self.root = tk.Tk()
         self.root.title("ToolDock")
-        self.root.geometry("1100x720+80+60")
+        session = self.load_session()
+        self.root.geometry(session.get("geometry") or "1100x720+80+60")
         self.root.configure(bg=BAR_BG)
         self.bar = tk.Frame(self.root, bg=BAR_BG, height=36)
         self.bar.pack(side=tk.TOP, fill=tk.X)
@@ -306,6 +319,86 @@ class Dock:
         self.root.bind("<Map>", lambda e: self.on_restore() if e.widget is self.root else None)
         self._layout_pending = False
         self.root.after(500, self.poll)
+        if self.auto_adopt:
+            # 窓が現れたことはフックで受ける。フックは別スレッドで受け、キューで渡す
+            # (tkinter の mainloop と同じスレッドで ctypes のコールバックを受けると Python ごと落ちた)
+            self._shown: queue.SimpleQueue[int] = queue.SimpleQueue()
+            self._hook_thread_id = 0
+            threading.Thread(target=self._watch_windows, daemon=True).start()
+            self.root.after(150, self._drain_shown)
+        self.root.after(300, lambda: self.startup(session))
+
+    # ── 自動取り込み / 前回のタブ ──
+    def _watch_windows(self) -> None:
+        self._hook_thread_id = kernel32.GetCurrentThreadId()
+
+        def on_show(_hook, _event, hwnd, id_object, id_child, _thread, _time):
+            if hwnd and id_object == OBJID_WINDOW and id_child == 0:
+                self._shown.put(hwnd)
+
+        proc = WINEVENTPROC(on_show)
+        hook = user32.SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW, None, proc, 0, 0,
+                                      WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS)
+        msg = wintypes.MSG()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            user32.TranslateMessage(ctypes.byref(msg))
+            user32.DispatchMessageW(ctypes.byref(msg))
+        user32.UnhookWinEvent(hook)
+
+    def _drain_shown(self) -> None:
+        seen = set()
+        while not self._shown.empty():
+            seen.add(self._shown.get())
+        for hwnd in seen:
+            # 現れた直後は、タイトルや大きさがまだ決まっていないことがあるので少し待つ
+            self.root.after(400, lambda h=hwnd: self.maybe_adopt(h))
+        self.root.after(150, self._drain_shown)
+
+    def tool_of_exe(self, exe: str) -> dict | None:
+        return next((t for t in self.tools if os.path.normcase(t["exe"]) == os.path.normcase(exe)), None)
+
+    def maybe_adopt(self, hwnd: int) -> None:
+        """登録済みのツールの最初の窓なら取り込む。外した窓・2 つ目の窓・ダイアログは取り込まない。"""
+        if self._closing or hwnd in self.ignored or hwnd == self.hwnd or any(t.hwnd == hwnd for t in self.tabs):
+            return
+        if (not user32.IsWindow(hwnd) or not user32.IsWindowVisible(hwnd) or user32.GetWindow(hwnd, GW_OWNER)
+                or user32.GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CAPTION != WS_CAPTION or not window_title(hwnd)):
+            return
+        pid = window_pid(hwnd)
+        if any(t.pid == pid for t in self.tabs):
+            return  # 同じプロセスの 2 つ目の窓 (設定画面など)
+        tool = self.tool_of_exe(process_path(pid))
+        if tool:
+            self.adopt(tool["name"], hwnd)
+
+    def startup(self, session: dict) -> None:
+        """前回のタブを開き直し (起動中なら取り込み、なければ起動)、ほかに起動中の登録済みツールも取り込む。"""
+        if self.restore_session:
+            for name in session.get("tabs", []):
+                tool = next((t for t in self.tools if t["name"] == name), None)
+                if tool:
+                    self.launch(tool)
+        if self.auto_adopt:
+            for hwnd in top_windows():
+                self.maybe_adopt(hwnd)
+        active = next((t for t in self.tabs if t.name == session.get("active")), None) if self.restore_session else None
+        if active:
+            self.select(active)
+
+    def load_session(self) -> dict:
+        try:
+            return json.loads(self.session_path.read_text(encoding="utf-8")) if self.restore_session else {}
+        except (OSError, ValueError):
+            return {}
+
+    def save_session(self) -> None:
+        if self._closing:
+            return
+        registered = {t["name"] for t in self.tools}
+        data = {"geometry": self.root.geometry(), "tabs": [t.name for t in self.tabs if t.name in registered],
+                "active": self.active.name if self.active else None}
+        self.session_path.parent.mkdir(parents=True, exist_ok=True)
+        self.session_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     @property
     def hwnd(self) -> int:
@@ -335,7 +428,10 @@ class Dock:
             while hwnd is None and time.time() < deadline:
                 self.root.update()
                 time.sleep(0.2)
-                hwnd = find_window(process_tree(proc.pid))
+                tree = process_tree(proc.pid)
+                if any(t.pid in tree for t in self.tabs):
+                    return  # 待っている間に自動取り込みがタブにした (取り込んだ窓は隠すので find_window では見えない)
+                hwnd = find_window(tree)
         if hwnd is None:
             print(f"[ToolDock] {tool['name']} の窓が見つかりません", file=sys.stderr)
             return
@@ -348,8 +444,9 @@ class Dock:
             user32.ShowWindow(hwnd, SW_RESTORE)
         style = user32.GetWindowLongPtrW(hwnd, GWL_STYLE)
         exstyle = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
-        tab = Tab(name, hwnd, style, exstyle, rect_of(hwnd), exe=os.path.normcase(process_path(window_pid(hwnd))),
-                  owner=user32.GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT))
+        pid = window_pid(hwnd)
+        tab = Tab(name, hwnd, style, exstyle, rect_of(hwnd), exe=os.path.normcase(process_path(pid)),
+                  owner=user32.GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT), pid=pid)
         self.tabs.append(tab)
         save_state(self.tabs)  # 変える前に控える
         user32.ShowWindow(hwnd, SW_HIDE)
@@ -368,6 +465,7 @@ class Dock:
         self.select(tab)
 
     def release(self, tab: Tab) -> None:
+        self.ignored.add(tab.hwnd)  # 元に戻すと窓が現れるので、自動取り込みがすぐ取り込み直してしまう
         restore_window(tab.hwnd, tab.style, tab.exstyle, tab.rect, tab.owner)
         self.forget(tab)
 
@@ -382,6 +480,7 @@ class Dock:
                 self.select(self.tabs[-1])
             else:
                 self.empty.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
+        self.save_session()
 
     def close_tab(self, tab: Tab) -> None:
         user32.PostMessageW(tab.hwnd, WM_CLOSE, 0, 0)  # 閉じたら poll が気づいてタブを消す
@@ -396,6 +495,7 @@ class Dock:
                 user32.ShowWindow(t.hwnd, SW_HIDE)
         self.active = tab
         self.place_active(show=True)
+        self.save_session()
 
     def body_rect(self) -> tuple[int, int, int, int]:
         self.root.update_idletasks()
@@ -470,16 +570,22 @@ class Dock:
         m.tk_popup(event.x_root, event.y_root)
 
     def quit(self) -> None:
+        self.save_session()  # 窓を戻す前に並びを覚える (戻すたびに保存すると空になる)
+        self._closing = True
         for t in list(self.tabs):
             self.release(t)
         if STATE.exists():
             STATE.unlink()
+        if getattr(self, "_hook_thread_id", 0):
+            user32.PostThreadMessageW(self._hook_thread_id, WM_QUIT, 0, 0)
         self.root.destroy()
 
 
-def load_tools() -> list[dict]:
+def load_config() -> tuple[list[dict], dict]:
+    """(ツール, 設定)。設定は auto_adopt (既定 true) と restore_session (既定 true)。"""
     path = Path(__file__).with_name("tooldock.toml")
-    return tomllib.loads(path.read_text(encoding="utf-8")).get("tool", []) if path.exists() else []
+    data = tomllib.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    return data.get("tool", []), {k: v for k, v in data.items() if k != "tool"}
 
 
 def main() -> None:
@@ -491,10 +597,19 @@ def main() -> None:
     n = rescue()  # 前回落ちたときに隠れたままの窓を戻す
     if n:
         print(f"[ToolDock] 前回の窓を {n} 個元に戻しました")
-    dock = Dock(load_tools())
-    if "--selftest" in sys.argv:
-        from selftest import run
-        run(dock, sys.argv[sys.argv.index("--selftest") + 1:])
+    tools, settings = load_config()
+    if "--selftest" not in sys.argv:
+        Dock(tools, settings).root.mainloop()
+        return
+    from selftest import MODES, run
+    args = sys.argv[sys.argv.index("--selftest") + 1:]
+    names = args[1:] if args[:1] and args[0] in MODES else args
+    # 試験のドックが扱うのは試験の対象だけ。人が使っている他のツールを自動で取り込まないように。
+    # 前回のタブも、人のもの (session.json) とは別のファイルを使う
+    tools = [t for t in tools if t["name"] in names]
+    settings = {**settings, "auto_adopt": True, "restore_session": args[:1] == ["session-restore"]}
+    dock = Dock(tools, settings, session_path=STATE_DIR / "session-selftest.json")
+    run(dock, args)
     dock.root.mainloop()
 
 

@@ -109,15 +109,22 @@ def guard(tools: list[dict]) -> str | None:
     return None
 
 
+MODES = ("crash", "session-save", "session-restore")
+
+
 def run(dock: td.Dock, args: list[str]) -> None:
-    crash = args[:1] == ["crash"]
-    names = args[1:] if crash else args
-    tools = [t for t in dock.tools if t["name"] in names]
-    reason = guard(tools)
+    mode = args[0] if args[:1] and args[0] in MODES else None
+    tools = dock.tools  # main が試験の対象だけに絞ってある
+    # session-restore は、直前の session-save が起動して残したツールを取り込むのが試験の中身なので、起動中でよい
+    reason = guard(tools) if mode != "session-restore" else (
+        "ほかの ToolDock が開いています。閉じてから流してください" if td.other_docks() else None)
     if reason:
         print(f"中止: {reason}", flush=True)
         os._exit(2)  # まだ何も取り込んでいない
-    steps = (crash_steps if crash else steps_all)(dock, tools)
+    # ドックが前回のタブを開き直す (300ms 後) 前に数える
+    dock.process_counts_before = {t["name"]: count_processes(t["exe"]) for t in tools}
+    steps = {"crash": crash_steps, "session-save": session_save_steps,
+             "session-restore": session_restore_steps}.get(mode, steps_all)(dock, tools)
 
     def tick():
         try:
@@ -138,6 +145,53 @@ def crash_steps(dock: td.Dock, tools: list[dict]):
     print(f"PID {os.getpid()}", flush=True)
     os._exit(3)  # 後片付けをせずに落ちる
     yield 0
+
+
+SESSION_GEOMETRY = "900x600+300+200"
+
+
+def session_save_steps(dock: td.Dock, tools: list[dict]):
+    """ツールを取り込み、大きさ・位置を変えてドックを閉じる。ツールは元の窓に戻って動き続ける。"""
+    for tool in tools:
+        dock.launch(tool)
+        yield 800
+    dock.root.geometry(SESSION_GEOMETRY)
+    yield 600
+    names = [t.name for t in dock.tabs]
+    dock.quit()
+    saved = td.json.loads(dock.session_path.read_text(encoding="utf-8"))
+    check(saved.get("tabs") == names and saved.get("geometry", "").startswith(SESSION_GEOMETRY),
+          f"閉じたときのタブと大きさ・位置を覚えた {saved}")
+    print(f"\n{sum(ok for ok, _ in results)}/{len(results)} PASS", flush=True)
+
+
+def session_restore_steps(dock: td.Dock, tools: list[dict]):
+    """前回のタブを開き直す (起動中なので取り込む)。最後にツールを閉じる。"""
+    for _ in range(30):
+        yield 300
+        if len(dock.tabs) == len(tools):
+            break
+    expected = [t["name"] for t in tools]  # 試験の前回のタブは session-save が全部を開いて閉じたもの
+    check([t.name for t in dock.tabs] == expected, f"前回のタブを開き直した ({[t.name for t in dock.tabs]})")
+    check(dock.root.geometry().startswith(SESSION_GEOMETRY), f"前回の大きさ・位置に戻った ({dock.root.geometry()})")
+    before, after = dock.process_counts_before, {t["name"]: count_processes(t["exe"]) for t in tools}
+    # 起動中だったものは取り込むだけ (数が変わらない)、起動していなかったものは起動する
+    check(all(after[n] == before[n] if before[n] else after[n] > 0 for n in before),
+          f"起動中のものは取り込み、なかったものは起動した ({before} → {after})")
+    if dock.tabs:
+        yield 800
+        check(on_top(dock, dock.active.hwnd), "開き直したタブの窓が手前に見えている")
+    for t in list(dock.tabs):
+        dock.close_tab(t)
+    for _ in range(20):
+        yield 300
+        if not dock.tabs:
+            break
+    dock.quit()
+    failed = [w for ok, w in results if not ok]
+    print(f"\n{len(results) - len(failed)}/{len(results)} PASS", flush=True)
+    if failed:
+        sys.exit(1)
 
 
 def steps_all(dock: td.Dock, tools: list[dict]):
@@ -303,6 +357,27 @@ def steps_all(dock: td.Dock, tools: list[dict]):
         if not dock.tabs:
             break
     check(not dock.tabs, f"{a.name} を閉じるとタブが消える")
+
+    # 自動取り込み: 外した窓はすぐに取り込み直さない / ドックの外で起動したツールはタブになる
+    yield 1500
+    check(not any(t.hwnd == b.hwnd for t in dock.tabs) and visible(b.hwnd), f"外した {b.name} は自動で取り込み直さない")
+    tool_a = next(t for t in tools if t["name"] == a.name)
+    outside = subprocess.Popen([tool_a["exe"]], cwd=str(Path(tool_a["exe"]).parent))  # ドックを通さずに起動
+    for _ in range(40):
+        yield 300
+        if any(t.name == a.name for t in dock.tabs):
+            break
+    tab = next((t for t in dock.tabs if t.name == a.name), None)
+    check(tab is not None and tab.pid in td.process_tree(outside.pid),
+          f"ドックの外で起動した {a.name} も自動でタブになる")
+    if tab:
+        yield 800
+        check(on_top(dock, tab.hwnd), "自動で取り込んだ窓も手前に見えている")
+        dock.close_tab(tab)
+        for _ in range(20):
+            yield 300
+            if not dock.tabs:
+                break
 
     td.user32.PostMessageW(b.hwnd, td.WM_CLOSE, 0, 0)  # テストで起動したものを片付ける
     yield 500
