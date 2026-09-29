@@ -29,8 +29,11 @@ pwsh packaging/build.ps1        # dist/ToolDock/ に ToolDock.exe (窓なし) �
 - **自動取り込み** (`auto_adopt = true`): ドックの外で起動した登録済みのツール (エクスプローラーからダブルクリックなど) も、
   窓が出たらタブになる。ドックを開いたときに起動中のものも取り込む。取り込むのはそのプロセスの最初の窓だけで、
   設定画面などの 2 つ目の窓やダイアログはタブにしない。「ドックから外す」で外した窓は取り込み直さない
-- **前回のタブ** (`restore_session = true`): 閉じたときのタブの並び・選んでいたタブ・大きさ・位置を
-  `%LOCALAPPDATA%\ToolDock\session.json` に覚え、次に開いたときに戻す。起動中なら取り込み、なければ起動する
+- **起動時に開く** (メニューの「起動時に開く ▶」): 「前回開いていたもの」「選んだものだけ」(ツールごとのチェック)
+  「何も開かない」から選ぶ。起動中なら取り込み、なければ起動する。選んだ内容は `%LOCALAPPDATA%\ToolDock\settings.json`
+  (`tooldock.toml` はプログラムから書き換えない)。まだ選んでいなければ `tooldock.toml` の `restore_session` に従う
+- **前回のタブ**: 閉じたときのタブの並び・選んでいたタブ・大きさ・位置を `%LOCALAPPDATA%\ToolDock\session.json` に覚える。
+  大きさ・位置は、起動時に開くものの選び方によらず戻す
 
 ## 仕組み (仮想タブ)
 
@@ -42,6 +45,8 @@ pwsh packaging/build.ps1        # dist/ToolDock/ に ToolDock.exe (窓なし) �
 - 所有者を付け替えた直後や隠していた窓を出した直後は、重なり順がまだ組み直されていない。ドックを一度 `HWND_TOP` に動かす
 - 選んでいないタブの窓は隠す。ドックの移動・大きさ変更に合わせて、選んでいる窓を動かす (重なり順には触らない)
 - 取り込んだ窓はタイトルバーを外して隠すので、窓を探しても見つからない。二重起動を避けるため、タブに exe を覚えておく
+- 元に戻すときは、属性を戻して見せたあと `ITaskbarList::AddTab` でタスクバーのボタンを明示的に足す。属性が元どおりでも
+  タスクバーがボタンを付け直さないことがあった (自動で取り込んだ PortWho が、ドックを閉じたあとタスクバーに出なかった)
 - 取り込んだ窓の元の状態 (枠・所有者・位置) は `%LOCALAPPDATA%\ToolDock\state-<プロセス番号>.json` に控える。
   ドックが落ちても相手の窓とプロセスは残り (所有者が外れるだけ)、次の起動か `--rescue` で元の枠に戻る。
   戻すのは、もう動いていないドックの控えだけ。1 つの `state.json` を共有していたときは、2 つ目のドックが
@@ -63,11 +68,16 @@ pwsh packaging/build.ps1        # dist/ToolDock/ に ToolDock.exe (窓なし) �
 ## 確かめ方
 
 ```sh
-uv run tooldock.py --selftest LPortMan PortWho   # 取り込み・二重起動・切り替え・リサイズ・移動 (途中も見えるか)・メニュー・最小化・別アプリとの重なり・外す・閉じる・自動取り込み (39 項目)
+uv run tooldock.py --selftest LPortMan PortWho   # 取り込み・二重起動・切り替え・リサイズ・移動 (途中も見えるか)・メニュー・最小化・別アプリとの重なり・起動時に開く・外す・閉じる・自動取り込み (44 項目)
 uv run check_rescue.py LPortMan                  # 取り込んだまま落として、--rescue で戻るか
 uv run check_state_files.py                      # 動いているドックの控えに触らないか (窓には触れない)
 uv run check_session.py PortWho RepoTether       # 前回のタブ: 起動中なら取り込み、なければ起動して並べ直すか
+uv run check_startup.py PortWho RepoTether       # 起動時に開く: 選び方ごとに開くもの・起動するものが変わるか
+uv run check_taskbar.py PortWho RepoTether       # ドックを閉じたあと、ツールがタスクバーに戻るか (UI Automation で見る)
 ```
+
+- タスクバーに出るかは、窓の属性 (所有者・拡張スタイル) では分からない。属性は元どおりでもボタンが無いことがあった。
+  タスクバーのボタン名を UI Automation で読んで確かめる
 
 - 試験のドックが扱うのは、試験の対象に挙げたツールだけ (自動取り込みで、人が使っている他のツールを取り込まないように)。
   前回のタブも人のもの (`session.json`) とは別の `session-selftest.json` を使う

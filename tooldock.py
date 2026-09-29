@@ -267,6 +267,40 @@ def restore_window(hwnd: int, style: int, exstyle: int, rect: tuple[int, int, in
     x, y, w, h = rect
     user32.SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED)
     user32.ShowWindow(hwnd, SW_SHOW)
+    # 属性を元に戻して見せても、タスクバーがボタンを付け直さないことがある (自動で取り込んだ PortWho で、
+    # ドックを閉じたあとタスクバーに出なかった)。所有者なし・WS_EX_TOOLWINDOW なしの窓だけ、明示的に足す
+    if not owner and not exstyle & WS_EX_TOOLWINDOW:
+        taskbar_add(hwnd)
+
+
+class GUID(ctypes.Structure):
+    _fields_ = [("Data1", ctypes.c_ulong), ("Data2", ctypes.c_ushort), ("Data3", ctypes.c_ushort),
+                ("Data4", ctypes.c_ubyte * 8)]
+
+
+def _guid(s: str) -> GUID:
+    g = GUID()
+    ctypes.oledll.ole32.CLSIDFromString(ctypes.c_wchar_p(s), ctypes.byref(g))
+    return g
+
+
+def taskbar_add(hwnd: int) -> bool:
+    """ITaskbarList::AddTab でタスクバーにボタンを足す。失敗しても落とさない (見た目だけの問題なので)。"""
+    ole32 = ctypes.windll.ole32
+    ole32.CoInitialize(None)  # すでに初期化済みなら S_FALSE / RPC_E_CHANGED_MODE。どちらでも使える
+    ptr = ctypes.c_void_p()
+    hr = ole32.CoCreateInstance(ctypes.byref(_guid("{56FDF344-FD6D-11d0-958A-006097C9A090}")), None, 1,  # CLSID_TaskbarList
+                                ctypes.byref(_guid("{56FDF342-FD6D-11d0-958A-006097C9A090}")), ctypes.byref(ptr))  # IID_ITaskbarList
+    if hr != 0 or not ptr:
+        return False
+    vtbl = ctypes.cast(ptr, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))[0]
+    proto = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)
+    proto_hwnd = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, wintypes.HWND)
+    try:
+        # vtable: 0 QueryInterface / 1 AddRef / 2 Release / 3 HrInit / 4 AddTab / 5 DeleteTab / ...
+        return proto(vtbl[3])(ptr) == 0 and proto_hwnd(vtbl[4])(ptr, hwnd) == 0
+    finally:
+        proto(vtbl[2])(ptr)
 
 
 def _restore_file(path: Path) -> int:
@@ -315,12 +349,16 @@ TAB_BG, TAB_ACTIVE, TAB_FG, TAB_FG_DIM, BAR_BG = "#252542", "#7c3aed", "#ffffff"
 
 
 class Dock:
-    def __init__(self, tools: list[dict], settings: dict | None = None, session_path: Path | None = None):
+    def __init__(self, tools: list[dict], settings: dict | None = None, session_path: Path | None = None,
+                 prefs_path: Path | None = None):
         settings = settings or {}
         self.tools = tools
         self.auto_adopt = settings.get("auto_adopt", True)
         self.restore_session = settings.get("restore_session", True)
         self.session_path = session_path or STATE_DIR / "session.json"
+        # メニューで変える設定 (起動時に開くもの)。tooldock.toml は人が書くものなので、プログラムからは書き換えない
+        self.prefs_path = prefs_path or STATE_DIR / "settings.json"
+        self.prefs = self.load_prefs()
         self.ignored: set[int] = set()  # 「ドックから外す」で外した窓。すぐ自動で取り込み直さない
         self._closing = False
         self.tabs: list[Tab] = []
@@ -404,25 +442,53 @@ class Dock:
         if tool:
             self.adopt(tool["name"], hwnd)
 
+    STARTUP_MODES = {"session": "前回開いていたもの", "selected": "選んだものだけ", "none": "何も開かない"}
+
+    @property
+    def startup_mode(self) -> str:
+        # メニューで選んだもの。まだ選んでいなければ tooldock.toml の restore_session に従う
+        mode = self.prefs.get("startup")
+        return mode if mode in self.STARTUP_MODES else ("session" if self.restore_session else "none")
+
+    def startup_names(self, session: dict) -> list[str]:
+        """起動時に開くツールの名前 (この並びでタブにする)。"""
+        if self.startup_mode == "session":
+            return session.get("tabs", [])
+        if self.startup_mode == "selected":
+            chosen = set(self.prefs.get("startup_tools", []))
+            return [t["name"] for t in self.tools if t["name"] in chosen]  # tooldock.toml の並び
+        return []
+
     def startup(self, session: dict) -> None:
-        """前回のタブを開き直し (起動中なら取り込み、なければ起動)、ほかに起動中の登録済みツールも取り込む。"""
-        if self.restore_session:
-            for name in session.get("tabs", []):
-                tool = next((t for t in self.tools if t["name"] == name), None)
-                if tool:
-                    self.launch(tool)
+        """起動時に開くものを開き (起動中なら取り込み、なければ起動)、ほかに起動中の登録済みツールも取り込む。"""
+        for name in self.startup_names(session):
+            tool = next((t for t in self.tools if t["name"] == name), None)
+            if tool:
+                self.launch(tool)
         if self.auto_adopt:
             for hwnd in top_windows():
                 self.maybe_adopt(hwnd)
-        active = next((t for t in self.tabs if t.name == session.get("active")), None) if self.restore_session else None
+        want = session.get("active") if self.startup_mode == "session" else None
+        active = next((t for t in self.tabs if t.name == want), None)
         if active:
             self.select(active)
 
     def load_session(self) -> dict:
+        """前回のタブと大きさ・位置。大きさ・位置は起動時に開くものの選び方によらず戻す。"""
         try:
-            return json.loads(self.session_path.read_text(encoding="utf-8")) if self.restore_session else {}
+            return json.loads(self.session_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
+
+    def load_prefs(self) -> dict:
+        try:
+            return json.loads(self.prefs_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def save_prefs(self) -> None:
+        self.prefs_path.parent.mkdir(parents=True, exist_ok=True)
+        self.prefs_path.write_text(json.dumps(self.prefs, ensure_ascii=False), encoding="utf-8")
 
     def save_session(self) -> None:
         if self._closing:
@@ -594,12 +660,44 @@ class Dock:
         for tool in self.tools:
             again.add_command(label=tool["name"], command=lambda t=tool: self.launch(t, new=True))
         m.add_cascade(label="もう 1 つ起動", menu=again)
+        # ── 設定 ──
+        m.add_separator()
+        m.add_cascade(label="起動時に開く", menu=self.build_startup_menu(m))
         if FROZEN:  # ソースから動かしているときは、登録する起動コマンドが定まらないので出さない
-            m.add_separator()
             self._autostart_var = tk.BooleanVar(value=autostart_enabled())
             m.add_checkbutton(label="ログイン時に起動する", variable=self._autostart_var,
                               command=lambda: set_autostart(self._autostart_var.get()))
         return m
+
+    def build_startup_menu(self, parent: tk.Menu) -> tk.Menu:
+        """起動時に開くもの: 前回開いていたもの / 選んだものだけ (ツールごとのチェック) / 何も開かない。"""
+        sub = tk.Menu(parent, tearoff=False)
+        self._startup_var = tk.StringVar(value=self.startup_mode)
+        for mode, label in self.STARTUP_MODES.items():
+            sub.add_radiobutton(label=label, value=mode, variable=self._startup_var, command=self.on_startup_mode)
+        sub.add_separator()
+        chosen = set(self.prefs.get("startup_tools", []))
+        state = tk.NORMAL if self.startup_mode == "selected" else tk.DISABLED
+        self._startup_tool_vars = {}
+        for tool in self.tools:
+            var = tk.BooleanVar(value=tool["name"] in chosen)
+            self._startup_tool_vars[tool["name"]] = var
+            sub.add_checkbutton(label=tool["name"], variable=var, state=state, command=self.on_startup_tools)
+        return sub
+
+    def on_startup_mode(self) -> None:
+        self.prefs["startup"] = self._startup_var.get()
+        if self.prefs["startup"] == "selected" and "startup_tools" not in self.prefs:
+            # 初めて「選んだものだけ」にしたときは、いま開いているタブを選んだ状態から始める
+            self.prefs["startup_tools"] = [t.name for t in self.tabs if self.tool_by_name(t.name)]
+        self.save_prefs()
+
+    def on_startup_tools(self) -> None:
+        self.prefs["startup_tools"] = [n for n, v in self._startup_tool_vars.items() if v.get()]
+        self.save_prefs()
+
+    def tool_by_name(self, name: str) -> dict | None:
+        return next((t for t in self.tools if t["name"] == name), None)
 
     def tab_menu(self, event, tab: Tab) -> None:
         m = tk.Menu(self.root, tearoff=False)
@@ -646,8 +744,14 @@ def main() -> None:
     # 試験のドックが扱うのは試験の対象だけ。人が使っている他のツールを自動で取り込まないように。
     # 前回のタブも、人のもの (session.json) とは別のファイルを使う
     tools = [t for t in tools if t["name"] in names]
-    settings = {**settings, "auto_adopt": True, "restore_session": args[:1] == ["session-restore"]}
-    dock = Dock(tools, settings, session_path=STATE_DIR / "session-selftest.json")
+    mode = args[0] if args[:1] and args[0] in MODES else None
+    session_path, prefs_path = STATE_DIR / "session-selftest.json", STATE_DIR / "settings-selftest.json"
+    if mode not in ("session-restore", "startup-check"):
+        # 前の試験が残した前回のタブ・設定 (大きさ・位置など) に左右されないように
+        session_path.unlink(missing_ok=True)
+        prefs_path.unlink(missing_ok=True)
+    settings = {**settings, "auto_adopt": True, "restore_session": mode in ("session-restore", "startup-check")}
+    dock = Dock(tools, settings, session_path=session_path, prefs_path=prefs_path)
     run(dock, args)
     dock.root.mainloop()
 

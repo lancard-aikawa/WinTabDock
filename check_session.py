@@ -54,4 +54,5 @@ if ok:
     running = [e for e in exes if any(os.path.normcase(td.process_path(p)) == os.path.normcase(e) for p in td.all_pids())]
     print(f"── ツールを閉じた (残り: {running or 'なし'})")
     ok = not running and step("session-restore", "4. 起動していないツールを、ドックが起動して開き直す")
+(td.STATE_DIR / "session-selftest.json").unlink(missing_ok=True)
 sys.exit(0 if ok else 1)

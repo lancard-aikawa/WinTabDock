@@ -109,22 +109,22 @@ def guard(tools: list[dict]) -> str | None:
     return None
 
 
-MODES = ("crash", "session-save", "session-restore")
+MODES = ("crash", "session-save", "session-restore", "startup-check", "adopt-quit")
 
 
 def run(dock: td.Dock, args: list[str]) -> None:
     mode = args[0] if args[:1] and args[0] in MODES else None
     tools = dock.tools  # main が試験の対象だけに絞ってある
     # session-restore は、直前の session-save が起動して残したツールを取り込むのが試験の中身なので、起動中でよい
-    reason = guard(tools) if mode != "session-restore" else (
+    reason = guard(tools) if mode not in ("session-restore", "adopt-quit") else (
         "ほかの ToolDock が開いています。閉じてから流してください" if td.other_docks() else None)
     if reason:
         print(f"中止: {reason}", flush=True)
         os._exit(2)  # まだ何も取り込んでいない
     # ドックが前回のタブを開き直す (300ms 後) 前に数える
     dock.process_counts_before = {t["name"]: count_processes(t["exe"]) for t in tools}
-    steps = {"crash": crash_steps, "session-save": session_save_steps,
-             "session-restore": session_restore_steps}.get(mode, steps_all)(dock, tools)
+    steps = {"crash": crash_steps, "session-save": session_save_steps, "session-restore": session_restore_steps,
+             "startup-check": startup_check_steps, "adopt-quit": adopt_quit_steps}.get(mode, steps_all)(dock, tools)
 
     def tick():
         try:
@@ -194,6 +194,39 @@ def session_restore_steps(dock: td.Dock, tools: list[dict]):
         sys.exit(1)
 
 
+def adopt_quit_steps(dock: td.Dock, tools: list[dict]):
+    """自動取り込み (起動時に起動中のもの / あとからドックの外で起動したもの) を待ち、全部そろったらドックを閉じる。
+    ツールは元の窓に戻って動き続ける (check_taskbar.py がタスクバーを見る)。"""
+    for _ in range(100):  # 最長 30 秒
+        yield 300
+        if len(dock.tabs) == len(tools):
+            break
+    yield 1500
+    print(f"TABS {td.json.dumps([t.name for t in dock.tabs], ensure_ascii=False)}", flush=True)
+    dock.quit()
+
+
+def startup_check_steps(dock: td.Dock, tools: list[dict]):
+    """起動時に開いたものを報告する (判定は check_startup.py)。最後に開いたツールを閉じる。"""
+    last, stable = None, 0
+    for _ in range(60):  # タブが 2 秒変わらなくなるまで待つ
+        yield 300
+        now = [t.name for t in dock.tabs]
+        stable = stable + 1 if now == last else 0
+        last = now
+        if stable >= 7:
+            break
+    print(f"TABS {td.json.dumps(last, ensure_ascii=False)}", flush=True)
+    print(f"COUNTS {td.json.dumps({t['name']: count_processes(t['exe']) for t in tools}, ensure_ascii=False)}", flush=True)
+    for t in list(dock.tabs):
+        dock.close_tab(t)
+    for _ in range(20):
+        yield 300
+        if not dock.tabs:
+            break
+    dock.quit()
+
+
 def steps_all(dock: td.Dock, tools: list[dict]):
     for tool in tools:
         dock.launch(tool)
@@ -212,9 +245,41 @@ def steps_all(dock: td.Dock, tools: list[dict]):
     # メニュー: ふだんの項目 (起動 / 切り替え) が上、「もう 1 つ起動」は一番下のサブメニューだけ
     m = dock.build_menu()
     labels = [m.entrycget(i, "label") if m.type(i) != "separator" else "---" for i in range(m.index("end") + 1)]
-    check(labels[-1] == "もう 1 つ起動" and not any("もう 1 つ" in s for s in labels[:-1]),
-          f"「もう 1 つ起動」はふだんの項目と分けて一番下にある {labels}")
+    everyday = labels.index("---")  # 最初の区切りまでがふだんの項目
+    check(labels.count("もう 1 つ起動") == 1 and labels.index("もう 1 つ起動") > labels.index("起動中の窓を取り込む") > everyday
+          and not any("もう 1 つ" in s for s in labels[:everyday]),
+          f"「もう 1 つ起動」はふだんの項目と分けて後ろにある {labels}")
     check(f"{tools[0]['name']} に切り替え" in labels, "取り込み済みのツールは「切り替え」になっている")
+
+    # 起動時に開く: 選ぶと設定に保存される。「選んだものだけ」のときだけツールのチェックが使える
+    def startup_menu():
+        mm = dock.build_menu()
+        idx = next(i for i in range(mm.index("end") + 1) if mm.type(i) == "cascade" and mm.entrycget(i, "label") == "起動時に開く")
+        return dock.root.nametowidget(mm.entrycget(idx, "menu"))
+
+    sm = startup_menu()
+    entries = [(sm.type(i), sm.entrycget(i, "label") if sm.type(i) != "separator" else "---",
+                sm.entrycget(i, "state") if sm.type(i) == "checkbutton" else "") for i in range(sm.index("end") + 1)]
+    radios = [e[1] for e in entries if e[0] == "radiobutton"]
+    checks_ = [e for e in entries if e[0] == "checkbutton"]
+    # まだ選んでいないときの既定は tooldock.toml の restore_session に従う (人の設定では true → 前回開いていたもの。
+    # 試験のドックは前回のタブに左右されないよう false で動かすので、何も開かない)
+    default = "session" if dock.restore_session else "none"
+    check(radios == ["前回開いていたもの", "選んだものだけ", "何も開かない"] and dock.startup_mode == default
+          and all(e[2] == "disabled" for e in checks_),
+          f"起動時に開く: 既定は restore_session に従い ({default})、ツールのチェックは使えない {entries}")
+    sm.invoke(radios.index("選んだものだけ"))
+    saved = td.json.loads(dock.prefs_path.read_text(encoding="utf-8"))
+    check(saved.get("startup") == "selected" and saved.get("startup_tools") == [t.name for t in dock.tabs],
+          f"「選んだものだけ」にすると、いま開いているタブを選んだ状態で保存する {saved}")
+    sm = startup_menu()
+    first_check = next(i for i in range(sm.index("end") + 1) if sm.type(i) == "checkbutton")
+    check(sm.entrycget(first_check, "state") == "normal", "「選んだものだけ」のときはツールのチェックが使える")
+    sm.invoke(first_check)  # 1 つ目のツールを外す
+    saved = td.json.loads(dock.prefs_path.read_text(encoding="utf-8"))
+    check(tools[0]["name"] not in saved.get("startup_tools", []), f"チェックを外すと選んだものから外れる {saved}")
+    sm.invoke(0)  # 前回開いていたもの に戻す
+    check(td.json.loads(dock.prefs_path.read_text(encoding="utf-8")).get("startup") == "session", "前回開いていたもの に戻せる")
     last = dock.tabs[-1].button  # 以降は最後のタブが選ばれている前提。本物のクリックで選び直す
     click(last.winfo_rootx() + last.winfo_width() // 2, last.winfo_rooty() + last.winfo_height() // 2)
     yield 700
@@ -383,6 +448,8 @@ def steps_all(dock: td.Dock, tools: list[dict]):
     yield 500
     dock.quit()
     check(not td.STATE.exists(), "ドックを閉じると控え (state.json) も消える")
+    dock.session_path.unlink(missing_ok=True)  # 試験用の前回のタブと設定を残さない
+    dock.prefs_path.unlink(missing_ok=True)
     failed = [w for ok, w in results if not ok]
     print(f"\n{len(results) - len(failed)}/{len(results)} PASS", flush=True)
     if failed:
