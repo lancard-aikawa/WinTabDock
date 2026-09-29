@@ -329,7 +329,8 @@ def steps_all(dock: td.Dock, tools: list[dict]):
           f"「もう 1 つ起動」はふだんの項目と分けて後ろにある {labels}")
     check(f"{tools[0]['name']} に切り替え" in labels, "取り込み済みのツールは「切り替え」になっている")
     sm_all = dock.build_settings_menu()
-    settings_labels = [sm_all.entrycget(i, "label") for i in range(sm_all.index("end") + 1) if sm_all.type(i) != "separator"]
+    settings_labels = [sm_all.entrycget(i, "label") for i in range(sm_all.index("end") + 1)
+                       if sm_all.type(i) != "separator" and sm_all.entrycget(i, "state") != "disabled"]  # 版の表示は除く
     check(not {"起動時に開く", "閉じるときのツール"} & set(labels) and settings_labels == ["起動時に開く", "閉じるときのツール"],
           f"設定は「+ 起動 / 取り込む」と分かれ、「設定」のメニューにある {settings_labels}")
     check(dock.settings_button.winfo_rootx() > dock.menu_button.winfo_rootx(), "「設定」ボタンは右端 (+ 起動 / 取り込む の右)")

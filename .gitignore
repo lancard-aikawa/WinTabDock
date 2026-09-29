@@ -3,3 +3,4 @@ __pycache__/
 docs/selftest-*.png
 build/
 dist/
+tooldock.toml

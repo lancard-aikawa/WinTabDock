@@ -4,7 +4,7 @@
 # ///
 """実験: ツールの窓の所有者 (owner) をドックにしたらどうなるか。
 
-    uv run experiments/owner_probe.py C:/Repos/mywork/PortWho/dist/PortWho.exe
+    uv run experiments/owner_probe.py <ツールの exe>
 
 子プロセスでドック役の Tk 窓を作り、ツールの窓の所有者にする。確かめること:
   1. ドックが前面 (タイトルバーを押した直後など) でも、ツールが手前に残るか

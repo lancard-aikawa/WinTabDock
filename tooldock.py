@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+__version__ = "0.1.0"  # 版を上げるときは CHANGELOG.md も (packaging/build.ps1 -Zip が zip の名前に使う)
+
 import ctypes
 import json
 import os
@@ -346,6 +348,7 @@ class Tab:
 
 
 TAB_BG, TAB_ACTIVE, TAB_FG, TAB_FG_DIM, BAR_BG = "#252542", "#7c3aed", "#ffffff", "#9a9ab8", "#1a1a2e"
+BAR_EDGE = "#7c3aed"  # 帯の下の区切り線と「設定」の枠 (アイコンの縁取りと同系の紫)
 
 
 class Dock:
@@ -376,13 +379,20 @@ class Dock:
         self.bar.pack(side=tk.TOP, fill=tk.X)
         self.tabs_frame = tk.Frame(self.bar, bg=BAR_BG)
         self.tabs_frame.pack(side=tk.LEFT, fill=tk.Y)
-        # 右端から: 設定 / + 起動 / 取り込む (side=RIGHT は先に置いたものほど右に並ぶ)
-        self.settings_button = tk.Button(self.bar, text="設定", command=self.show_settings, bg=TAB_BG, fg=TAB_FG_DIM,
-                                         relief=tk.FLAT, activebackground=TAB_ACTIVE, padx=10)
-        self.settings_button.pack(side=tk.RIGHT, padx=(0, 6), pady=4)
+        # 右端から: 設定 / + 起動 / 取り込む (side=RIGHT は先に置いたものほど右に並ぶ)。
+        # 「設定」は枠線付きにして、取り込んだツールの中の「設定」(RepoTether のタブなど) と見分けられるようにする
+        # 枠は 1px 大きい紫の Frame で包んで描く (Windows の tk.Button は highlightthickness の枠を描かなかった)
+        frame = tk.Frame(self.bar, bg=BAR_EDGE, padx=1, pady=1)
+        frame.pack(side=tk.RIGHT, padx=(0, 8), pady=4)
+        self.settings_button = tk.Button(frame, text="設定 ▾", command=self.show_settings, bg=BAR_BG, fg=TAB_FG,
+                                         relief=tk.FLAT, activebackground=TAB_ACTIVE, padx=10, bd=0)
+        self.settings_button.pack()
         self.menu_button = tk.Button(self.bar, text="+ 起動 / 取り込む", command=self.show_menu, bg=TAB_BG, fg=TAB_FG,
                                      relief=tk.FLAT, activebackground=TAB_ACTIVE, padx=10)
         self.menu_button.pack(side=tk.RIGHT, padx=6, pady=4)
+        # タブの帯と、取り込んだツールの窓の境目。ツールの上端にも帯と似た見た目 (タブや「設定」) があると、
+        # どこまでがドックか分かりにくかった
+        tk.Frame(self.root, bg=BAR_EDGE, height=2).pack(side=tk.TOP, fill=tk.X)
         self.body = tk.Frame(self.root, bg="#0d0d1a")
         self.body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         self.empty = tk.Label(self.body, text="右上の「+ 起動 / 取り込む」からツールを開きます",
@@ -684,6 +694,8 @@ class Dock:
             self._autostart_var = tk.BooleanVar(value=autostart_enabled())
             m.add_checkbutton(label="ログイン時に起動する", variable=self._autostart_var,
                               command=lambda: set_autostart(self._autostart_var.get()))
+        m.add_separator()
+        m.add_command(label=f"ToolDock {__version__}", state=tk.DISABLED)  # 版の表示 (押せない)
         return m
 
     def build_startup_menu(self, parent: tk.Menu) -> tk.Menu:
