@@ -71,6 +71,11 @@ user32.IsIconic.argtypes = [wintypes.HWND]
 user32.WindowFromPoint.restype = wintypes.HWND
 user32.WindowFromPoint.argtypes = [wintypes.POINT]
 user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+user32.SendMessageW.restype = LONG_PTR
+user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.GetAsyncKeyState.restype = ctypes.c_short
+user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+VK_LBUTTON = 0x01
 user32.GetForegroundWindow.restype = wintypes.HWND
 user32.SetForegroundWindow.argtypes = [wintypes.HWND]
 
@@ -129,17 +134,29 @@ def process_path(pid: int) -> str:
         kernel32.CloseHandle(h)
 
 
-def process_tree(root_pid: int) -> set[int]:
-    """root_pid とその子孫。PyInstaller の onefile は子プロセスが窓を出すため。"""
+def _snapshot() -> list[tuple[int, int]]:
+    """(pid, 親 pid) の一覧。"""
     snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
-    children: dict[int, list[int]] = {}
+    out = []
     entry = PROCESSENTRY32W()
     entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
     ok = kernel32.Process32FirstW(snap, ctypes.byref(entry))
     while ok:
-        children.setdefault(entry.th32ParentProcessID, []).append(entry.th32ProcessID)
+        out.append((entry.th32ProcessID, entry.th32ParentProcessID))
         ok = kernel32.Process32NextW(snap, ctypes.byref(entry))
     kernel32.CloseHandle(snap)
+    return out
+
+
+def all_pids() -> list[int]:
+    return [pid for pid, _ in _snapshot()]
+
+
+def process_tree(root_pid: int) -> set[int]:
+    """root_pid とその子孫。PyInstaller の onefile は子プロセスが窓を出すため。"""
+    children: dict[int, list[int]] = {}
+    for pid, parent in _snapshot():
+        children.setdefault(parent, []).append(pid)
     out, stack = set(), [root_pid]
     while stack:
         p = stack.pop()
@@ -225,6 +242,7 @@ class Tab:
     exstyle: int
     rect: tuple[int, int, int, int]
     button: tk.Button | None = None
+    exe: str = ""  # normcase 済み。同じツールの二重起動を避けるため
 
 
 TAB_BG, TAB_ACTIVE, TAB_FG, TAB_FG_DIM, BAR_BG = "#252542", "#7c3aed", "#ffffff", "#9a9ab8", "#1a1a2e"
@@ -288,9 +306,23 @@ class Dock:
         return user32.GetAncestor(self.root.winfo_id(), GA_ROOT)
 
     # ── 取り込み / 手放し ──
-    def launch(self, tool: dict) -> None:
+    def tab_of_exe(self, exe: str) -> Tab | None:
+        return next((t for t in self.tabs if t.exe == os.path.normcase(exe)), None)
+
+    def launch(self, tool: dict, new: bool = False) -> None:
+        """ツールを開く。new=False なら、取り込み済みはそのタブへ切り替え、起動中 (ドックの外) は取り込む。
+
+        取り込んだ窓はタイトルバーを外して隠しているので find_window では見つからない。
+        タブの側で exe を覚えておかないと、2 つ目を起動してしまう (試験で 1 → 2 になった)
+        """
         exe = tool["exe"]
-        hwnd = find_window(set(), exe)  # 起動中ならそれを取り込む (2 つ目を起動しない)
+        hwnd = None
+        if not new:
+            tab = self.tab_of_exe(exe)
+            if tab:
+                self.select(tab)
+                return
+            hwnd = find_window(set(), exe)
         if hwnd is None:
             proc = subprocess.Popen([exe], cwd=str(Path(exe).parent))
             deadline = time.time() + 20
@@ -310,7 +342,7 @@ class Dock:
             user32.ShowWindow(hwnd, SW_RESTORE)
         style = user32.GetWindowLongPtrW(hwnd, GWL_STYLE)
         exstyle = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
-        tab = Tab(name, hwnd, style, exstyle, rect_of(hwnd))
+        tab = Tab(name, hwnd, style, exstyle, rect_of(hwnd), exe=os.path.normcase(process_path(window_pid(hwnd))))
         self.tabs.append(tab)
         save_state(self.tabs)  # 変える前に控える
         user32.ShowWindow(hwnd, SW_HIDE)
@@ -384,7 +416,12 @@ class Dock:
         if fg == self.active.hwnd:
             user32.SetWindowPos(self.hwnd, self.active.hwnd, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
         elif fg == self.hwnd or any(t.hwnd == fg for t in self.tabs):
-            # ドックか、切り替える前のタブ (いまは隠れている) が前面 → 今のツールを前面にする
+            # ドックか、切り替える前のタブ (いまは隠れている) が前面 → 今のツールを前面にする。
+            # ただしマウスのボタンが押されている間は待つ。ドックの枠やタイトルバーをつかんだ瞬間に前面を
+            # ツールへ移すと、始まったばかりのリサイズ・移動が取り消される (枠をドラッグしても大きさが変わらなかった)
+            if user32.GetAsyncKeyState(VK_LBUTTON) & 0x8000:
+                self.root.after(100, self.raise_group)
+                return
             user32.SetForegroundWindow(self.active.hwnd)
 
     def after_layout(self) -> None:
@@ -421,7 +458,11 @@ class Dock:
     def show_menu(self) -> None:
         m = tk.Menu(self.root, tearoff=False)
         for tool in self.tools:
-            m.add_command(label=f"起動: {tool['name']}", command=lambda t=tool: self.launch(t))
+            if self.tab_of_exe(tool["exe"]):
+                m.add_command(label=f"{tool['name']} に切り替え", command=lambda t=tool: self.launch(t))
+                m.add_command(label=f"{tool['name']} をもう 1 つ起動", command=lambda t=tool: self.launch(t, new=True))
+            else:
+                m.add_command(label=f"起動: {tool['name']}", command=lambda t=tool: self.launch(t))
         m.add_separator()
         sub = tk.Menu(m, tearoff=False)
         mine = {t.hwnd for t in self.tabs} | {self.hwnd}

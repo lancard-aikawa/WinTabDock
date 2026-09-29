@@ -7,9 +7,12 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 from PIL import ImageGrab
@@ -40,6 +43,29 @@ def on_top(dock: td.Dock, hwnd: int) -> bool:
     """ドックの本体の中央で、いちばん手前にある窓が hwnd か (位置と表示状態だけでは、後ろに回っていても通ってしまう)。"""
     x, y, w, h = dock.body_rect()
     return top_at(x + w // 2, y + h // 2) == hwnd
+
+
+def count_processes(exe: str) -> int:
+    return sum(1 for pid in td.all_pids() if os.path.normcase(td.process_path(pid)) == os.path.normcase(exe))
+
+
+def drag(x0: int, y0: int, x1: int, y1: int) -> None:
+    """本物のマウスでドラッグする。別スレッドから呼ぶ (枠のドラッグ中は Windows のサイズ変更ループが Tk を止める)。"""
+    td.user32.SetCursorPos(x0, y0)
+    time.sleep(0.2)
+    td.user32.mouse_event(0x0002, 0, 0, 0, 0)
+    for i in range(1, 11):
+        time.sleep(0.03)
+        td.user32.SetCursorPos(x0 + (x1 - x0) * i // 10, y0 + (y1 - y0) * i // 10)
+    time.sleep(0.2)
+    td.user32.mouse_event(0x0004, 0, 0, 0, 0)
+
+
+def frame_rect(hwnd: int) -> tuple[int, int, int, int]:
+    """見えている枠 (Windows 10/11 は GetWindowRect が見えない縁を含む)。"""
+    r = td.wintypes.RECT()
+    ctypes.windll.dwmapi.DwmGetWindowAttribute(td.wintypes.HWND(hwnd), 9, ctypes.byref(r), ctypes.sizeof(r))
+    return r.left, r.top, r.right - r.left, r.bottom - r.top
 
 
 def click(x: int, y: int) -> None:
@@ -90,6 +116,19 @@ def steps_all(dock: td.Dock, tools: list[dict]):
         dock.launch(tool)
         yield 800
     check(len(dock.tabs) == len(tools), f"{len(tools)} 個のツールをタブに取り込んだ ({[t.name for t in dock.tabs]})")
+
+    # 取り込み済みのツールをもう一度「起動」しても、2 つ目を起動せずにそのタブへ切り替える
+    exe = tools[0]["exe"]
+    before = count_processes(exe)
+    dock.launch(tools[0])
+    yield 1500
+    check(count_processes(exe) == before and len(dock.tabs) == len(tools),
+          f"取り込み済みの {tools[0]['name']} をもう一度起動しても、2 つ目は起動しない (プロセス {before} → {count_processes(exe)})")
+    check(dock.active and dock.active.name == tools[0]["name"], "そのタブに切り替わる")
+    last = dock.tabs[-1].button  # 以降は最後のタブが選ばれている前提。本物のクリックで選び直す
+    click(last.winfo_rootx() + last.winfo_width() // 2, last.winfo_rooty() + last.winfo_height() // 2)
+    yield 700
+
     for t in dock.tabs:
         style = td.user32.GetWindowLongPtrW(t.hwnd, td.GWL_STYLE)
         ex = td.user32.GetWindowLongPtrW(t.hwnd, td.GWL_EXSTYLE)
@@ -110,6 +149,36 @@ def steps_all(dock: td.Dock, tools: list[dict]):
     check(near(td.rect_of(b.hwnd), dock.body_rect()), "切り替えた窓も本体に重なった")
     check(on_top(dock, b.hwnd), "切り替えた窓もドックより手前に見えている")
     shot(dock, "selftest-2.png")
+
+    # ドックの右下の角を本物のマウスでドラッグして大きさを変える
+    fx, fy, fw, fh = frame_rect(dock.hwnd)
+    if os.environ.get("TOOLDOCK_DEBUG"):
+        names = {dock.hwnd: "dock", a.hwnd: a.name, b.hwnd: b.name}
+        for label, (px, py) in {"外側 +3": (fx + fw + 3, fy + fh + 3), "内側 -2": (fx + fw - 2, fy + fh - 2)}.items():
+            at = top_at(px, py)
+            ht = td.user32.SendMessageW(dock.hwnd, 0x0084, 0, (py << 16) | (px & 0xFFFF))  # WM_NCHITTEST
+            print(f"  debug 角の{label} ({px},{py}): 窓={names.get(at, at)} / ドックの判定={ht} (17=右下の角)", flush=True)
+        print(f"  debug 見えている枠={frame_rect(dock.hwnd)} GetWindowRect={td.rect_of(dock.hwnd)}"
+              f" 本体={dock.body_rect()} ツール={td.rect_of(b.hwnd)}", flush=True)
+    t = threading.Thread(target=drag, args=(fx + fw + 3, fy + fh + 3, fx + fw - 150, fy + fh - 100))
+    t.start()
+    while t.is_alive():
+        yield 100
+    yield 600
+    nx, ny, nw, nh = frame_rect(dock.hwnd)
+    check(nw < fw - 100 and nh < fh - 60, f"ドックの右下の角をドラッグすると大きさが変わる ({fw}x{fh} → {nw}x{nh})")
+    check(near(td.rect_of(b.hwnd), dock.body_rect()) and on_top(dock, b.hwnd), "ツールの窓も新しい大きさについてくる")
+
+    # タイトルバーを本物のマウスでドラッグして動かす
+    fx, fy, fw, fh = frame_rect(dock.hwnd)
+    t = threading.Thread(target=drag, args=(fx + fw // 2, fy + 12, fx + fw // 2 + 120, fy + 12 + 80))
+    t.start()
+    while t.is_alive():
+        yield 100
+    yield 600
+    nx, ny, _, _ = frame_rect(dock.hwnd)
+    check(abs(nx - fx - 120) <= 4 and abs(ny - fy - 80) <= 4, f"タイトルバーをドラッグするとドックが動く ({fx},{fy} → {nx},{ny})")
+    check(near(td.rect_of(b.hwnd), dock.body_rect()) and on_top(dock, b.hwnd), "ツールの窓も動いた先についてくる")
 
     dock.root.geometry("900x600+300+200")
     yield 600
