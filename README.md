@@ -8,6 +8,19 @@ uv run tooldock.py              # tooldock.toml のツールを並べたドッ�
 uv run tooldock.py --rescue     # ドックが落ちて隠れたままの窓を元に戻す
 ```
 
+## exe
+
+```powershell
+pwsh packaging/build.ps1        # dist/ToolDock/ に ToolDock.exe (窓なし) と _internal/ を作る
+```
+
+- 設定は exe の隣の `tooldock.toml`。ビルド時に無ければ見本を置く (あれば上書きしない)
+- 「+ 起動 / 取り込む」の一番下の「ログイン時に起動する」で、HKCU の Run に exe の場所を登録する。exe を移動したら入れ直す
+- 窓なしの exe では `sys.stdout` が `None`。`sys.stdout.reconfigure()` をそのまま呼ぶと起動しなかった
+- アイコンの元は `assets/icon.svg` (48px 以上) と `assets/icon-small.svg` (32px 以下)。`uv run tools/make-icon.py` で ICO を作り直す
+- 確かめ方: `uv run check_exe.py`。exe を一時フォルダにコピーし、PortWho と RepoTether だけの設定と
+  `TOOLDOCK_HOME` (控えと前回のタブの置き場所) を一時フォルダに向けて動かす。人の前回のタブや他のツールには触れない
+
 - 右上の「+ 起動 / 取り込む」から、`tooldock.toml` のツールを起動するか、起動中の窓を取り込む。
   取り込み済みのツールは「〇〇 に切り替え」になり、2 つ目は起動しない。2 つ目が要るときは、一番下の「もう 1 つ起動」から。
   ドックの外で起動中のものがあれば、起動せずにその窓を取り込む

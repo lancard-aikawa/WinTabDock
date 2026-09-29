@@ -206,7 +206,36 @@ def find_window(pids: set[int], exe: str | None = None) -> int | None:
 
 # 控えはドック (プロセス) ごとに分ける。1 つのファイルを共有していたとき、試験で開いた 2 つ目のドックが
 # 動いている方のドックの控えを「前回落ちたもの」と取り違え、その窓を元に戻したうえで控えを消した
-STATE_DIR = Path(os.environ.get("LOCALAPPDATA", ".")) / "ToolDock"
+# 控えと前回のタブの置き場所。TOOLDOCK_HOME で変えられる (exe を試すとき、人の前回のタブに触れないように)
+STATE_DIR = Path(os.environ.get("TOOLDOCK_HOME") or Path(os.environ.get("LOCALAPPDATA", ".")) / "ToolDock")
+
+# exe (PyInstaller) では、設定 (tooldock.toml) は exe の隣、同梱したアイコンは _MEIPASS にある
+FROZEN = bool(getattr(sys, "frozen", False))
+APP_DIR = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
+RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+
+def autostart_enabled() -> bool:
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
+            return winreg.QueryValueEx(k, "ToolDock")[0] == f'"{sys.executable}"'
+    except OSError:
+        return False
+
+
+def set_autostart(on: bool) -> None:
+    """ログイン時に起動する (HKCU の Run)。登録するのはいま動いている exe の場所なので、移動したら入れ直す。"""
+    import winreg
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+        if on:
+            winreg.SetValueEx(k, "ToolDock", 0, winreg.REG_SZ, f'"{sys.executable}"')
+        else:
+            try:
+                winreg.DeleteValue(k, "ToolDock")
+            except FileNotFoundError:
+                pass
 LEGACY_STATE = STATE_DIR / "state.json"  # 以前の共有の控え。--rescue でだけ扱う
 
 
@@ -298,6 +327,10 @@ class Dock:
         self.active: Tab | None = None
         self.root = tk.Tk()
         self.root.title("ToolDock")
+        try:
+            self.root.iconbitmap(default=str(RES_DIR / "assets" / "icon.ico"))  # 窓とタスクバーのアイコン
+        except tk.TclError:
+            pass
         session = self.load_session()
         self.root.geometry(session.get("geometry") or "1100x720+80+60")
         self.root.configure(bg=BAR_BG)
@@ -561,6 +594,11 @@ class Dock:
         for tool in self.tools:
             again.add_command(label=tool["name"], command=lambda t=tool: self.launch(t, new=True))
         m.add_cascade(label="もう 1 つ起動", menu=again)
+        if FROZEN:  # ソースから動かしているときは、登録する起動コマンドが定まらないので出さない
+            m.add_separator()
+            self._autostart_var = tk.BooleanVar(value=autostart_enabled())
+            m.add_checkbutton(label="ログイン時に起動する", variable=self._autostart_var,
+                              command=lambda: set_autostart(self._autostart_var.get()))
         return m
 
     def tab_menu(self, event, tab: Tab) -> None:
@@ -583,13 +621,14 @@ class Dock:
 
 def load_config() -> tuple[list[dict], dict]:
     """(ツール, 設定)。設定は auto_adopt (既定 true) と restore_session (既定 true)。"""
-    path = Path(__file__).with_name("tooldock.toml")
+    path = APP_DIR / "tooldock.toml"
     data = tomllib.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     return data.get("tool", []), {k: v for k, v in data.items() if k != "tool"}
 
 
 def main() -> None:
-    sys.stdout.reconfigure(encoding="utf-8")
+    if sys.stdout:  # 窓なしの exe では sys.stdout が None (ここで落ちて exe が起動しなかった)
+        sys.stdout.reconfigure(encoding="utf-8")
     ctypes.windll.shcore.SetProcessDpiAwareness(2)  # 座標を物理ピクセルでそろえる (相手の窓と合わせるため)
     if "--rescue" in sys.argv:
         print(f"{rescue(include_legacy=True)} 個の窓を元に戻しました")

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- 32px 以下用 (icon.svg の簡略版)。本体の中の線を省き、タブ 2 つと本体だけにする -->
+  <rect x="0.5" y="0.5" width="31" height="31" rx="7" fill="#2a2a4a" stroke="#565690"/>
+  <rect x="4" y="5" width="10" height="6" rx="2" fill="#7c3aed"/>
+  <rect x="15" y="5" width="8" height="6" rx="2" fill="#4a4a7a"/>
+  <rect x="4" y="12" width="24" height="16" rx="2.5" fill="#e2e8f0"/>
+</svg>
