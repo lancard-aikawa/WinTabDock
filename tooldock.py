@@ -70,6 +70,9 @@ user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, w
 user32.IsIconic.argtypes = [wintypes.HWND]
 user32.WindowFromPoint.restype = wintypes.HWND
 user32.WindowFromPoint.argtypes = [wintypes.POINT]
+user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+user32.GetForegroundWindow.restype = wintypes.HWND
+user32.SetForegroundWindow.argtypes = [wintypes.HWND]
 
 kernel32.OpenProcess.restype = wintypes.HANDLE
 kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
@@ -360,12 +363,29 @@ class Dock:
         if not self.active:
             return
         x, y, w, h = self.body_rect()
+        # 位置と大きさだけ合わせる。重なり順は raise_group() に任せる
+        user32.SetWindowPos(self.active.hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE)
         if show:
             user32.ShowWindow(self.active.hwnd, SW_SHOWNOACTIVATE)
-        user32.SetWindowPos(self.active.hwnd, HWND_TOP, x, y, w, h, SWP_NOACTIVATE)
-        # ツールを上げるだけでは、ドックが前景のときに Windows がドックを手前に戻すことがある (試験で見えなかった)。
-        # 自分の窓は確実に動かせるので、ドックをツールの直下へ下げる
-        user32.SetWindowPos(self.hwnd, self.active.hwnd, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+            self.raise_group()
+
+    def raise_group(self) -> None:
+        """ドックとツールを、ツールが上・ドックがその直下になるように前へ出す。
+
+        別プロセスの窓は HWND_TOP で上げようとしても、前面の窓より上には上がらないことがある
+        (ドックのタイトルバーで戻ると、ツールが他のアプリの後ろに残った)。前面にいるプロセスからの
+        SetForegroundWindow は許されるので、ドックが前面ならツールを前面にする。ツールが前面になると
+        on_foreground が呼ばれ、ドックをその直下へ付ける。ツールが後ろにあるうちにドックを下げてはいけない
+        (ドックまで他のアプリの後ろに回る)
+        """
+        if not self.active:
+            return
+        fg = user32.GetForegroundWindow()
+        if fg == self.active.hwnd:
+            user32.SetWindowPos(self.hwnd, self.active.hwnd, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+        elif fg == self.hwnd or any(t.hwnd == fg for t in self.tabs):
+            # ドックか、切り替える前のタブ (いまは隠れている) が前面 → 今のツールを前面にする
+            user32.SetForegroundWindow(self.active.hwnd)
 
     def after_layout(self) -> None:
         if not self._layout_pending:
@@ -387,11 +407,9 @@ class Dock:
     def on_foreground(self, hwnd: int) -> None:
         if not self.active or not hwnd:
             return
-        if hwnd == self.active.hwnd:
-            # ツールが前に来た → ドックをその直下へ (タブの帯が他の窓の後ろに残らないように)
-            user32.SetWindowPos(self.hwnd, self.active.hwnd, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
-        elif hwnd == self.hwnd:
-            user32.SetWindowPos(self.active.hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+        if hwnd in (self.hwnd, self.active.hwnd):
+            # ツールが前に来た → ドックをその直下へ / ドックが前に来た → ツールを前面にする
+            self.raise_group()
 
     def poll(self) -> None:
         for t in list(self.tabs):

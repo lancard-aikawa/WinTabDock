@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -16,6 +17,9 @@ from PIL import ImageGrab
 import tooldock as td
 
 DOCS = Path(__file__).with_name("docs")
+# 「別のアプリ」の役。ドックの左上に重なる位置に出す
+OTHER_APP = ("import tkinter as t; r=t.Tk(); r.title('other app'); r.geometry('800x500+0+0'); "
+             "t.Label(r, text='other app', bg='#2d6a4f', fg='white').pack(fill='both', expand=True); r.mainloop()")
 results: list[tuple[bool, str]] = []
 
 
@@ -28,11 +32,21 @@ def visible(hwnd: int) -> bool:
     return bool(td.user32.IsWindowVisible(hwnd))
 
 
+def top_at(x: int, y: int) -> int:
+    return td.user32.GetAncestor(td.user32.WindowFromPoint(td.wintypes.POINT(x, y)), td.GA_ROOT)
+
+
 def on_top(dock: td.Dock, hwnd: int) -> bool:
     """ドックの本体の中央で、いちばん手前にある窓が hwnd か (位置と表示状態だけでは、後ろに回っていても通ってしまう)。"""
     x, y, w, h = dock.body_rect()
-    at = td.user32.WindowFromPoint(td.wintypes.POINT(x + w // 2, y + h // 2))
-    return td.user32.GetAncestor(at, td.GA_ROOT) == hwnd
+    return top_at(x + w // 2, y + h // 2) == hwnd
+
+
+def click(x: int, y: int) -> None:
+    """本物のマウス操作でクリックする。プログラムからの前面化と、人のクリックとでは Windows の扱いが違うため。"""
+    td.user32.SetCursorPos(x, y)
+    td.user32.mouse_event(0x0002, 0, 0, 0, 0)  # LEFTDOWN
+    td.user32.mouse_event(0x0004, 0, 0, 0, 0)  # LEFTUP
 
 
 def near(a, b, tol=2) -> bool:
@@ -88,8 +102,10 @@ def steps_all(dock: td.Dock, tools: list[dict]):
     check(on_top(dock, a.hwnd), "選んだ窓がドックより手前に見えている")
     shot(dock, "selftest-1.png")
 
-    dock.select(b)
-    yield 500
+    # タブは本物のクリックで切り替える。dock.select() をプログラムから呼ぶと、前面が別プロセス (前のタブ) のため
+    # SetForegroundWindow が拒否され、実際の操作では起きない失敗になる
+    click(b.button.winfo_rootx() + b.button.winfo_width() // 2, b.button.winfo_rooty() + b.button.winfo_height() // 2)
+    yield 700
     check(visible(b.hwnd) and not visible(a.hwnd), "タブを切り替えると窓が入れ替わる")
     check(near(td.rect_of(b.hwnd), dock.body_rect()), "切り替えた窓も本体に重なった")
     check(on_top(dock, b.hwnd), "切り替えた窓もドックより手前に見えている")
@@ -99,6 +115,37 @@ def steps_all(dock: td.Dock, tools: list[dict]):
     yield 600
     check(near(td.rect_of(b.hwnd), dock.body_rect()), f"ドックを動かす・大きさを変えると窓がついてくる {td.rect_of(b.hwnd)}")
     check(on_top(dock, b.hwnd), "動かしたあとも手前に見えている")
+
+    # 別のアプリの窓がドックの左上に重なっている場面 (ドックは 300,200 900x600、別の窓は 0,0 800x500)
+    other_proc = subprocess.Popen([sys.executable, "-c", OTHER_APP])
+    other = None
+    for _ in range(30):
+        yield 200
+        other = td.find_window(td.process_tree(other_proc.pid))
+        if other:
+            break
+    yield 800
+    dx, dy, dw, dh = td.rect_of(dock.hwnd)
+    bx, by, bw, bh = dock.body_rect()
+    covered_body = (bx + 100, by + 50)        # 別の窓が重なっている、ドック本体の点
+    covered_bar = (dx + 30, dy + 45)          # 別の窓が重なっている、タブの帯の点
+    free_title = (dx + dw - 200, dy + 12)     # 別の窓が重なっていない、ドックのタイトルバー
+    free_tool = (dx + dw - 100, by + bh // 2)  # 別の窓が重なっていない、ツールの窓の点
+    check(other and top_at(*covered_body) == other, "別のアプリの窓が前に出て、ドックの一部を隠している")
+
+    click(*free_title)  # A: ドックのタイトルバーをクリックして戻る
+    yield 700
+    check(top_at(*covered_body) == b.hwnd, "A: ドックのタイトルバーをクリックすると、ツールの窓も前に戻る")
+    check(top_at(*covered_bar) == dock.hwnd, "A: タブの帯も前に戻る")
+
+    click(20, 20)  # 別のアプリを前に出す
+    yield 700
+    click(*free_tool)  # B: 見えているツールの部分をクリックして戻る
+    yield 700
+    check(top_at(*covered_body) == b.hwnd, "B: ツールをクリックすると、ツールの窓全体が前に出る")
+    check(top_at(*covered_bar) == dock.hwnd, "B: タブの帯もツールと一緒に前に出る")
+    td.user32.PostMessageW(other, td.WM_CLOSE, 0, 0)
+    yield 500
 
     dock.root.iconify()
     yield 600
