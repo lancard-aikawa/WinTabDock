@@ -66,6 +66,17 @@ shutil.copytree(ROOT / "dist" / "ToolDock", app)
     f'[[tool]]\nname = "PortWho"\nexe = "{portwho["exe"]}"\n\n'
     f'[[tool]]\nname = "RepoTether"\nexe = "{repotether["exe"]}"\n', encoding="utf-8")
 env = {**os.environ, "TOOLDOCK_HOME": str(work / "home")}
+# ドックの × を「元の窓に戻して残す」にしておく。既定の「毎回たずねる」だと、閉じるメッセージを送っても
+# たずねる画面で止まり、ドックも取り込んだ PortWho も残った
+(work / "home").mkdir(parents=True, exist_ok=True)
+(work / "home" / "settings.json").write_text(td.json.dumps({"on_close": "keep"}), encoding="utf-8")
+
+
+def kill_test_exes() -> None:
+    """一時フォルダの exe (この試験が起動したドック) を、途中で失敗しても必ず止める。"""
+    for p in td.all_pids():
+        if os.path.normcase(td.process_path(p)) == os.path.normcase(str(app / "ToolDock.exe")):
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(p)], capture_output=True)
 exe = str(app / "ToolDock.exe")
 
 
@@ -77,6 +88,7 @@ def stop_here(proc):
     """ドックの窓が見つからないまま先へ進むと、「所有者 == ドック (なし)」が所有者のない窓と一致して
     見かけだけ通ってしまった。見つからなければ、起動した exe を止めて終わる。"""
     subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+    kill_test_exes()
     shutil.rmtree(work, ignore_errors=True)
     print(f"\n{sum(results)}/{len(results)} PASS (途中で中止)")
     sys.exit(1)
@@ -159,6 +171,7 @@ for h in windows_of(pw.pid):
 wait(lambda: pw.poll() is not None, 10)
 if pw.poll() is None:
     subprocess.run(["taskkill", "/F", "/T", "/PID", str(pw.pid)], capture_output=True)
+kill_test_exes()
 shutil.rmtree(work, ignore_errors=True)
 print(f"\n{sum(results)}/{len(results)} PASS")
 sys.exit(0 if all(results) else 1)

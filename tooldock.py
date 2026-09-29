@@ -384,7 +384,7 @@ class Dock:
         self.empty = tk.Label(self.body, text="右上の「+ 起動 / 取り込む」からツールを開きます",
                               bg="#0d0d1a", fg=TAB_FG_DIM)
         self.empty.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
-        self.root.protocol("WM_DELETE_WINDOW", self.quit)
+        self.root.protocol("WM_DELETE_WINDOW", self.request_close)
         self.root.bind("<Configure>", lambda e: self.after_layout())
         self.root.bind("<Unmap>", lambda e: self.on_minimize() if e.widget is self.root else None)
         self.root.bind("<Map>", lambda e: self.on_restore() if e.widget is self.root else None)
@@ -663,6 +663,12 @@ class Dock:
         # ── 設定 ──
         m.add_separator()
         m.add_cascade(label="起動時に開く", menu=self.build_startup_menu(m))
+        on_close = tk.Menu(m, tearoff=False)
+        self._on_close_var = tk.StringVar(value=self.on_close_mode)
+        for mode, label in self.ON_CLOSE_MODES.items():
+            on_close.add_radiobutton(label=label, value=mode, variable=self._on_close_var,
+                                     command=lambda: self.set_on_close(self._on_close_var.get()))
+        m.add_cascade(label="閉じるときのツール", menu=on_close)
         if FROZEN:  # ソースから動かしているときは、登録する起動コマンドが定まらないので出さない
             self._autostart_var = tk.BooleanVar(value=autostart_enabled())
             m.add_checkbutton(label="ログイン時に起動する", variable=self._autostart_var,
@@ -695,6 +701,92 @@ class Dock:
     def on_startup_tools(self) -> None:
         self.prefs["startup_tools"] = [n for n, v in self._startup_tool_vars.items() if v.get()]
         self.save_prefs()
+
+    # ── 閉じるとき ──
+    ON_CLOSE_MODES = {"ask": "毎回たずねる", "close": "一緒に閉じる", "keep": "元の窓に戻して残す"}
+    CLOSE_WAIT_S = 5  # 「一緒に閉じる」でツールが閉じ終わるのを待つ長さ
+
+    @property
+    def on_close_mode(self) -> str:
+        mode = self.prefs.get("on_close")
+        return mode if mode in self.ON_CLOSE_MODES else "ask"
+
+    def set_on_close(self, mode: str) -> None:
+        self.prefs["on_close"] = mode
+        self.save_prefs()
+
+    def request_close(self) -> None:
+        """ドックの × から。取り込んでいるツールを閉じるか残すかは、設定 (または毎回たずねる) に従う。"""
+        if self._closing:
+            return  # ツールが閉じ終わるのを待っている間に、もう一度 × を押された
+        if not self.tabs or self.on_close_mode == "keep":
+            self.quit()
+        elif self.on_close_mode == "close":
+            self.close_tools_and_quit()
+        else:
+            self.ask_close()
+
+    def ask_close(self) -> None:
+        win = tk.Toplevel(self.root)
+        win.title("ToolDock を閉じる")
+        win.transient(self.root)
+        win.resizable(False, False)
+        remember = tk.BooleanVar(value=False)
+
+        def choose(mode: str | None) -> None:
+            win.grab_release()
+            win.destroy()
+            if mode is None:
+                return
+            if remember.get():
+                self.set_on_close(mode)
+            self.close_tools_and_quit() if mode == "close" else self.quit()
+
+        # ボタンの行を先に下へ置く (本体を先に置くと、ボタンが画面の外に押し出される)
+        bar = tk.Frame(win)
+        bar.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=10)
+        self._close_buttons = {
+            "close": tk.Button(bar, text="ツールも閉じる", width=14, command=lambda: choose("close")),
+            "keep": tk.Button(bar, text="残して閉じる", width=14, command=lambda: choose("keep")),
+            "cancel": tk.Button(bar, text="キャンセル", width=10, command=lambda: choose(None)),
+        }
+        self._close_buttons["cancel"].pack(side=tk.RIGHT)
+        self._close_buttons["keep"].pack(side=tk.RIGHT, padx=(0, 6))
+        self._close_buttons["close"].pack(side=tk.RIGHT, padx=(0, 6))
+        self._close_remember = tk.Checkbutton(win, text="次からたずねない (メニューの「閉じるときのツール」で戻せる)",
+                                              variable=remember)
+        self._close_remember.pack(side=tk.BOTTOM, anchor=tk.W, padx=10)
+        names = "、".join(t.name for t in self.tabs)
+        tk.Label(win, text=f"取り込んでいるツール ({names}) も閉じますか？\n残す場合は、元の窓に戻ります。",
+                 justify=tk.LEFT).pack(side=tk.TOP, anchor=tk.W, padx=12, pady=(12, 6))
+        win.protocol("WM_DELETE_WINDOW", lambda: choose(None))
+        win.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - win.winfo_width()) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - win.winfo_height()) // 3
+        win.geometry(f"+{x}+{y}")
+        self._close_dialog = win
+        win.grab_set()
+        self._close_buttons["keep"].focus_set()
+
+    def close_tools_and_quit(self) -> None:
+        """取り込んでいるツールに閉じるメッセージ (× と同じ) を送り、閉じ終わるのを待ってからドックを閉じる。
+        待っても閉じないもの (保存の確認を出しているなど) は元の窓に戻して残す。確認の画面ごと消さないため。"""
+        self.save_session()  # 閉じる前の並びを覚える (次回「前回開いていたもの」で開けるように)
+        self._closing = True  # 以降、タブが減るたびに前回の並びを上書きしない。自動取り込みもしない
+        for t in list(self.tabs):
+            user32.PostMessageW(t.hwnd, WM_CLOSE, 0, 0)
+        deadline = time.time() + self.CLOSE_WAIT_S
+
+        def wait() -> None:
+            for t in list(self.tabs):
+                if not user32.IsWindow(t.hwnd):
+                    self.forget(t)
+            if self.tabs and time.time() < deadline:
+                self.root.after(200, wait)
+            else:
+                self.quit()  # 残ったものは元の窓に戻す
+
+        self.root.after(200, wait)
 
     def tool_by_name(self, name: str) -> dict | None:
         return next((t for t in self.tools if t["name"] == name), None)

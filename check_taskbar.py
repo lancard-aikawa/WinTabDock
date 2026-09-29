@@ -19,39 +19,13 @@ import time
 from pathlib import Path
 
 import tooldock as td
-from selftest import count_processes
+from selftest import count_processes, on_taskbar, windows_of
 
 sys.stdout.reconfigure(encoding="utf-8")
 names = sys.argv[1:]
 tools = [t for t in td.load_config()[0] if t["name"] in names]
 env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
 results = []
-
-PS = r"""
-[Console]::OutputEncoding = [Text.Encoding]::UTF8
-Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
-$A = [System.Windows.Automation.AutomationElement]
-$tray = $A::RootElement.FindFirst([System.Windows.Automation.TreeScope]::Children,
-  (New-Object System.Windows.Automation.PropertyCondition($A::ClassNameProperty, 'Shell_TrayWnd')))
-$tray.FindAll([System.Windows.Automation.TreeScope]::Descendants,
-  (New-Object System.Windows.Automation.PropertyCondition($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button))) |
-  ForEach-Object { $_.Current.Name }
-"""
-
-
-def taskbar_names() -> list[str]:
-    out = subprocess.run(["pwsh", "-NoProfile", "-Command", PS], capture_output=True, text=True, encoding="utf-8")
-    return [n for n in out.stdout.splitlines() if n.strip()]
-
-
-def windows_of(exe: str) -> list[int]:
-    return [h for h in td.top_windows() if os.path.normcase(td.process_path(td.window_pid(h))) == os.path.normcase(exe)]
-
-
-def on_taskbar(tool: dict) -> bool:
-    titles = [td.window_title(h) for h in windows_of(tool["exe"])]
-    buttons = taskbar_names()
-    return any(t and any(t in b for b in buttons) for t in titles)
 
 
 def check(ok, what):

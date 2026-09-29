@@ -45,6 +45,34 @@ def on_top(dock: td.Dock, hwnd: int) -> bool:
     return top_at(x + w // 2, y + h // 2) == hwnd
 
 
+# タスクバーのボタン名 (UI Automation)。タスクバーに出るかは窓の属性では分からない (属性は元どおりでも出ないことがあった)
+TASKBAR_PS = r"""
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+$A = [System.Windows.Automation.AutomationElement]
+$tray = $A::RootElement.FindFirst([System.Windows.Automation.TreeScope]::Children,
+  (New-Object System.Windows.Automation.PropertyCondition($A::ClassNameProperty, 'Shell_TrayWnd')))
+$tray.FindAll([System.Windows.Automation.TreeScope]::Descendants,
+  (New-Object System.Windows.Automation.PropertyCondition($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button))) |
+  ForEach-Object { $_.Current.Name }
+"""
+
+
+def taskbar_names() -> list[str]:
+    out = subprocess.run(["pwsh", "-NoProfile", "-Command", TASKBAR_PS], capture_output=True, text=True, encoding="utf-8")
+    return [n for n in out.stdout.splitlines() if n.strip()]
+
+
+def windows_of(exe: str) -> list[int]:
+    return [h for h in td.top_windows() if os.path.normcase(td.process_path(td.window_pid(h))) == os.path.normcase(exe)]
+
+
+def on_taskbar(tool: dict) -> bool:
+    titles = [td.window_title(h) for h in windows_of(tool["exe"])]
+    buttons = taskbar_names()
+    return any(t and any(t in b for b in buttons) for t in titles)
+
+
 def count_processes(exe: str) -> int:
     return sum(1 for pid in td.all_pids() if os.path.normcase(td.process_path(pid)) == os.path.normcase(exe))
 
@@ -109,7 +137,11 @@ def guard(tools: list[dict]) -> str | None:
     return None
 
 
-MODES = ("crash", "session-save", "session-restore", "startup-check", "adopt-quit")
+MODES = ("crash", "session-save", "session-restore", "startup-check", "adopt-quit", "close-check")
+# × を無視するアプリの役 (閉じるメッセージを送っても閉じない。保存の確認を出しているツールの代わり)
+STUBBORN_APP = ("import tkinter as t; r=t.Tk(); r.title('stubborn app'); r.geometry('500x300+100+100'); "
+                "r.protocol('WM_DELETE_WINDOW', lambda: None); "
+                "t.Label(r, text='stubborn app (x を無視する)').pack(expand=True); r.mainloop()")
 
 
 def run(dock: td.Dock, args: list[str]) -> None:
@@ -124,7 +156,8 @@ def run(dock: td.Dock, args: list[str]) -> None:
     # ドックが前回のタブを開き直す (300ms 後) 前に数える
     dock.process_counts_before = {t["name"]: count_processes(t["exe"]) for t in tools}
     steps = {"crash": crash_steps, "session-save": session_save_steps, "session-restore": session_restore_steps,
-             "startup-check": startup_check_steps, "adopt-quit": adopt_quit_steps}.get(mode, steps_all)(dock, tools)
+             "startup-check": startup_check_steps, "adopt-quit": adopt_quit_steps,
+             "close-check": close_check_steps}.get(mode, steps_all)(dock, tools)
 
     def tick():
         try:
@@ -192,6 +225,51 @@ def session_restore_steps(dock: td.Dock, tools: list[dict]):
     print(f"\n{len(results) - len(failed)}/{len(results)} PASS", flush=True)
     if failed:
         sys.exit(1)
+
+
+def close_check_steps(dock: td.Dock, tools: list[dict]):
+    """ドックの × を押したときの動き。TOOLDOCK_CLOSE_CASE で場合を選ぶ (判定は check_close.py)。
+    close / keep / ask-close / ask-keep (次からたずねない) / ask-cancel / close-stubborn (× を無視するアプリ入り)"""
+    case = os.environ["TOOLDOCK_CLOSE_CASE"]
+    for tool in tools:
+        dock.launch(tool)
+        yield 800
+    if case == "close-stubborn":
+        # 出力は引き継がせない。引き継ぐと、ドックが終わってもこのアプリが試験の出力のパイプを持ち続け、
+        # check_close.py が出力の終わりを待ち続けて止まった
+        p = subprocess.Popen([sys.executable, "-c", STUBBORN_APP], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        hwnd = None
+        for _ in range(30):
+            yield 300
+            hwnd = td.find_window(td.process_tree(p.pid))
+            if hwnd:
+                break
+        dock.adopt("Stubborn", hwnd)
+        print(f"STUBBORN {p.pid} {hwnd}", flush=True)
+        yield 500
+    print(f"TABS {td.json.dumps([t.name for t in dock.tabs], ensure_ascii=False)}", flush=True)
+    dock.prefs["on_close"] = {"close": "close", "close-stubborn": "close", "keep": "keep"}.get(case, "ask")
+    dock.request_close()  # ドックの × と同じ
+    if not case.startswith("ask"):
+        return
+    yield 700
+    print(f"DIALOG {bool(getattr(dock, '_close_dialog', None) and dock._close_dialog.winfo_exists())}", flush=True)
+    if case == "ask-cancel":
+        d = dock._close_dialog
+        d.update_idletasks()
+        x, y, w, h = td.rect_of(td.user32.GetAncestor(d.winfo_id(), td.GA_ROOT))
+        DOCS.mkdir(exist_ok=True)
+        ImageGrab.grab(bbox=(x, y, x + w, y + h), all_screens=True).save(DOCS / "selftest-close-dialog.png")
+    if case == "ask-keep":
+        dock._close_remember.select()  # 次からたずねない
+    dock._close_buttons[{"ask-close": "close", "ask-keep": "keep", "ask-cancel": "cancel"}[case]].invoke()
+    if case == "ask-cancel":
+        yield 800
+        print(f"AFTER_CANCEL {td.json.dumps([t.name for t in dock.tabs], ensure_ascii=False)} "
+              f"dock={bool(td.user32.IsWindow(dock.hwnd))}", flush=True)
+        dock.prefs["on_close"] = "close"  # 片付け: ツールも閉じる
+        dock.request_close()
 
 
 def adopt_quit_steps(dock: td.Dock, tools: list[dict]):
@@ -280,6 +358,17 @@ def steps_all(dock: td.Dock, tools: list[dict]):
     check(tools[0]["name"] not in saved.get("startup_tools", []), f"チェックを外すと選んだものから外れる {saved}")
     sm.invoke(0)  # 前回開いていたもの に戻す
     check(td.json.loads(dock.prefs_path.read_text(encoding="utf-8")).get("startup") == "session", "前回開いていたもの に戻せる")
+
+    # 閉じるときのツール: 既定は「毎回たずねる」。選ぶと設定に保存される
+    mm = dock.build_menu()
+    idx = next(i for i in range(mm.index("end") + 1) if mm.type(i) == "cascade" and mm.entrycget(i, "label") == "閉じるときのツール")
+    cm = dock.root.nametowidget(mm.entrycget(idx, "menu"))
+    labels_c = [cm.entrycget(i, "label") for i in range(cm.index("end") + 1)]
+    check(labels_c == ["毎回たずねる", "一緒に閉じる", "元の窓に戻して残す"] and dock.on_close_mode == "ask",
+          f"閉じるときのツール: 既定は「毎回たずねる」 {labels_c}")
+    cm.invoke(1)
+    check(td.json.loads(dock.prefs_path.read_text(encoding="utf-8")).get("on_close") == "close", "「一緒に閉じる」を選ぶと保存される")
+    cm.invoke(0)
     last = dock.tabs[-1].button  # 以降は最後のタブが選ばれている前提。本物のクリックで選び直す
     click(last.winfo_rootx() + last.winfo_width() // 2, last.winfo_rooty() + last.winfo_height() // 2)
     yield 700
