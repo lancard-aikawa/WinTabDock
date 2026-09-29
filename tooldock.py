@@ -376,6 +376,10 @@ class Dock:
         self.bar.pack(side=tk.TOP, fill=tk.X)
         self.tabs_frame = tk.Frame(self.bar, bg=BAR_BG)
         self.tabs_frame.pack(side=tk.LEFT, fill=tk.Y)
+        # 右端から: 設定 / + 起動 / 取り込む (side=RIGHT は先に置いたものほど右に並ぶ)
+        self.settings_button = tk.Button(self.bar, text="設定", command=self.show_settings, bg=TAB_BG, fg=TAB_FG_DIM,
+                                         relief=tk.FLAT, activebackground=TAB_ACTIVE, padx=10)
+        self.settings_button.pack(side=tk.RIGHT, padx=(0, 6), pady=4)
         self.menu_button = tk.Button(self.bar, text="+ 起動 / 取り込む", command=self.show_menu, bg=TAB_BG, fg=TAB_FG,
                                      relief=tk.FLAT, activebackground=TAB_ACTIVE, padx=10)
         self.menu_button.pack(side=tk.RIGHT, padx=6, pady=4)
@@ -660,8 +664,15 @@ class Dock:
         for tool in self.tools:
             again.add_command(label=tool["name"], command=lambda t=tool: self.launch(t, new=True))
         m.add_cascade(label="もう 1 つ起動", menu=again)
-        # ── 設定 ──
-        m.add_separator()
+        return m
+
+    def show_settings(self) -> None:
+        b = self.settings_button
+        self.build_settings_menu().tk_popup(b.winfo_rootx() + b.winfo_width() - 220, b.winfo_rooty() + b.winfo_height())
+
+    def build_settings_menu(self) -> tk.Menu:
+        """設定は「+ 起動 / 取り込む」と分ける (一緒のメニューだと、ふだんの操作と設定が混ざって分かりにくかった)。"""
+        m = tk.Menu(self.root, tearoff=False)
         m.add_cascade(label="起動時に開く", menu=self.build_startup_menu(m))
         on_close = tk.Menu(m, tearoff=False)
         self._on_close_var = tk.StringVar(value=self.on_close_mode)

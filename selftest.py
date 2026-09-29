@@ -328,10 +328,15 @@ def steps_all(dock: td.Dock, tools: list[dict]):
           and not any("もう 1 つ" in s for s in labels[:everyday]),
           f"「もう 1 つ起動」はふだんの項目と分けて後ろにある {labels}")
     check(f"{tools[0]['name']} に切り替え" in labels, "取り込み済みのツールは「切り替え」になっている")
+    sm_all = dock.build_settings_menu()
+    settings_labels = [sm_all.entrycget(i, "label") for i in range(sm_all.index("end") + 1) if sm_all.type(i) != "separator"]
+    check(not {"起動時に開く", "閉じるときのツール"} & set(labels) and settings_labels == ["起動時に開く", "閉じるときのツール"],
+          f"設定は「+ 起動 / 取り込む」と分かれ、「設定」のメニューにある {settings_labels}")
+    check(dock.settings_button.winfo_rootx() > dock.menu_button.winfo_rootx(), "「設定」ボタンは右端 (+ 起動 / 取り込む の右)")
 
     # 起動時に開く: 選ぶと設定に保存される。「選んだものだけ」のときだけツールのチェックが使える
     def startup_menu():
-        mm = dock.build_menu()
+        mm = dock.build_settings_menu()
         idx = next(i for i in range(mm.index("end") + 1) if mm.type(i) == "cascade" and mm.entrycget(i, "label") == "起動時に開く")
         return dock.root.nametowidget(mm.entrycget(idx, "menu"))
 
@@ -360,7 +365,7 @@ def steps_all(dock: td.Dock, tools: list[dict]):
     check(td.json.loads(dock.prefs_path.read_text(encoding="utf-8")).get("startup") == "session", "前回開いていたもの に戻せる")
 
     # 閉じるときのツール: 既定は「毎回たずねる」。選ぶと設定に保存される
-    mm = dock.build_menu()
+    mm = dock.build_settings_menu()
     idx = next(i for i in range(mm.index("end") + 1) if mm.type(i) == "cascade" and mm.entrycget(i, "label") == "閉じるときのツール")
     cm = dock.root.nametowidget(mm.entrycget(idx, "menu"))
     labels_c = [cm.entrycget(i, "label") for i in range(cm.index("end") + 1)]
