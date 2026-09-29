@@ -1,0 +1,14 @@
+# ToolDock に並べるツール。「+ 起動 / 取り込む」のメニューに出る。
+# 起動中のものがあれば、2 つ目は起動せずにその窓を取り込む。
+
+[[tool]]
+name = "LPortMan"
+exe = "C:/Repos/mywork/LPortMan/dist/LPortMan/lportmanw.exe"
+
+[[tool]]
+name = "PortWho"
+exe = "C:/Repos/mywork/PortWho/dist/PortWho.exe"
+
+[[tool]]
+name = "RepoTether"
+exe = "C:/Repos/mywork/RepoTether/src-tauri/target/release/repotether.exe"
