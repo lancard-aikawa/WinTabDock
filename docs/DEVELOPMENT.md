@@ -85,9 +85,9 @@ uv run check_close.py PortWho RepoTether         # × を押したとき: 一緒
 「設定」の「スマホから使う」で入り切りする (入れたかは settings.json の `remote` に覚え、次の起動でも始める)。
 
 ```sh
-uv run check_remote.py           # ドックに試験用の窓を 2 つ取り込み、noVNC と同じ WebSocket でつなぐ。設定の画面と QR コード、つないでいる間の知らせの窓、表示倍率も (42 項目)
-uv run check_remote_android.py   # Android の実機 (USB デバッグ) の Chrome から (12 項目)
-uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi で PC のこのアドレスにつなぐ (USB は試験の操作だけ。13 項目)
+uv run check_remote.py           # ドックに試験用の窓を 2 つ取り込み、noVNC と同じ WebSocket でつなぐ。設定の画面と QR コード、つないでいる間の知らせの窓、表示倍率、絵文字も (43 項目)
+uv run check_remote_android.py   # Android の実機 (USB デバッグ) の Chrome から (14 項目)
+uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi で PC のこのアドレスにつなぐ (USB は試験の操作だけ。14 項目)
 ```
 
 - **Wi-Fi でつなぐときは、Windows のファイアウォールで受信の許可が要る。** 初めて待ち受けるときに出る確認で許可を押さないと、
@@ -197,6 +197,10 @@ uv run experiments/vnc_android_check.py                       # Android の実�
 - **noVNC が同じ大きさを 1 秒に 10 回頼み続けた。** 幅が 411.43 のように端数になる画面で、受け付けたと返すたびに noVNC が
   表示を作り直し、その拍子に大きさの監視が反応してまた頼んでくる。今と同じ大きさの頼みには「変えない」(状態 1) と返して止めた。
   この間は最初のタップが時々抜けていたが、止めてからは 3 回続けて全部通った
+- **絵文字 (🍦 U+1F366) を打つと接続が切れた** (ユーザーの報告、2026-10-27)。noVNC はスマホの絵文字を、1 つの keysym ではなく
+  代理対の片方ずつ (0x0100D83C, 0x0100DF66) 2 回に分けて送ってくる。片方だけの文字を `encode("utf-16-le")` して例外になり、
+  受け取りのスレッドごと落ちていた (記録にも残らなかった)。片方ずつならそのまま `WM_CHAR` で送る (Windows 自身も 2 回に分けて
+  送り、相手がつなげる)。押す・打つで例外が出ても接続は切らず、remote.log に書く。実機で直す前は切れ、直した後は打てた
 - 画面のキーボードを出すと、その分だけブラウザの中が狭くなる (画面写真では下の端がキーボードに隠れた)。大きさを頼み直すかは未確認
 - **前の試験の noVNC のタブが残っていると、それをつかむ。** 試験が落ちて閉じ損ねたタブは、`reconnect=true` で裏でつなぎ直し続ける。
   URL だけで探すとその裏のタブを選び、JavaScript には応えるがタッチ (`dispatchTouchEvent`) が返らず 10 秒で落ちた。

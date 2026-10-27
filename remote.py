@@ -386,8 +386,12 @@ class WindowInput:
             scan = _u.MapVirtualKeyW(vk, 0)
             _u.PostMessageW(dest, WM_KEYDOWN if down else WM_KEYUP, vk, 1 | scan << 16 | (0 if down else 0xC0000000))
         elif down:
-            units = ch.encode("utf-16-le")
-            for unit in struct.unpack(f"<{len(units) // 2}H", units):  # BMP の外の文字は代理対の 2 つに分けて送る
+            # WM_CHAR は UTF-16 の 1 単位ずつ。BMP の外の文字 (絵文字) は代理対の 2 つに分けて送る (Windows 自身もそうする)。
+            # noVNC は絵文字を、1 つの keysym (U+1F366) でなく、代理対の片方ずつ 2 回に分けて送ってくることがある。
+            # 片方だけの文字は encode で例外になり、接続ごと切れた。片方ずつならそのまま送れば、相手が 2 つをつなげる
+            cp = ord(ch)
+            units = [cp] if cp <= 0xFFFF else [0xD800 | (cp - 0x10000) >> 10, 0xDC00 | (cp - 0x10000) & 0x3FF]
+            for unit in units:
                 _u.PostMessageW(dest, WM_CHAR, unit, 1)
 
 
@@ -539,6 +543,13 @@ class Session:
                     + struct.pack(">I", len(name)) + name)
         self.server.log(f"{self.name}: つながった ({w}x{h})")
 
+    def _input(self, fn, *args) -> None:
+        """押す・打つを窓に送る。送るのに失敗しても接続は切らず、記録に残す (絵文字で切れたことがあった)。"""
+        try:
+            fn(*args)
+        except Exception as e:  # noqa: BLE001
+            self.server.log(f"{self.name}: 入力を送れなかった {fn.__name__}{args}: {e!r}")
+
     def _reader(self) -> None:
         r = self.s.recv
         while True:
@@ -560,10 +571,10 @@ class Session:
                     self.cond.notify_all()
             elif t == 4:  # KeyEvent
                 down, key = struct.unpack(">B2xI", r(7))
-                self.view.input.key(bool(down), key)
+                self._input(self.view.input.key, bool(down), key)
             elif t == 5:  # PointerEvent
                 mask, x, y = struct.unpack(">BHH", r(5))
-                self.view.input.pointer(mask, x, y)
+                self._input(self.view.input.pointer, mask, x, y)
             elif t == 6:  # ClientCutText (読み捨てる)
                 n = struct.unpack(">3xi", r(7))[0]
                 r(abs(n))

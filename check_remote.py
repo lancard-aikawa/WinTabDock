@@ -221,6 +221,13 @@ def steps(dock: td.Dock) -> None:
             c.key(ks)
         title = ck.wait_title(h1, "text=okあ ")
         check("文字と日本語を打てる", "text=okあ " in title, title)
+        # 絵文字 (U+1F366)。noVNC は代理対の片方ずつ 2 回に分けて送ってくることがあり、片方だけを文字にしようとして接続ごと切れた
+        for ks in (0x0100D83C, 0x0100DF66, 0x0101F366):  # 片方ずつ 2 回 + 1 つの keysym
+            c.key(ks)
+        title = ck.wait_title(h1, "text=okあ🍦🍦 ")
+        alive = bool(dock.remote_server and dock.remote_server.peers())
+        check("絵文字を打てる (片方ずつ届いても 1 文字になり、接続が切れない)", "text=okあ🍦🍦 " in title and alive,
+              f"{title} 接続 {alive}")
 
         mapped = tk_get(dock, lambda: (dock.menu_button.winfo_ismapped(), dock.settings_button.winfo_ismapped(),
                                        dock.zoom_out_button.winfo_ismapped(), dock.zoom_in_button.winfo_ismapped()))

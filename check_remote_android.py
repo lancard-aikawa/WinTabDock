@@ -107,6 +107,11 @@ def steps(dock: td.Dock) -> None:
         tab.call("Input.insertText", text="日本語")
         title = ck.wait_title(h1, "text=abc日本語 ")
         ck.check("文字と日本語の確定文字を打てる", "text=abc日本語 " in title, title)
+        tab.call("Input.insertText", text="🍦")  # 絵文字で接続が切れたことがある
+        title = ck.wait_title(h1, "text=abc日本語🍦 ")
+        time.sleep(1.0)
+        alive = bool(dock.remote_server and dock.remote_server.peers())
+        ck.check("絵文字を打てて、接続が切れない", "text=abc日本語🍦 " in title and alive, f"{title} 接続 {alive}")
         va.screenshot("dock-2-typed")
         tab.js("document.getElementById('noVNC_keyboardinput').blur()")
         time.sleep(1.0)
