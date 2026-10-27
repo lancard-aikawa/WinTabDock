@@ -160,6 +160,9 @@ def steps(dock: td.Dock) -> None:
         dock.call_in_tk(lambda: dock.adopt("app2", h2))
         dock.call_in_tk(lambda: dock.select(dock.tabs[0]))
         original = tk_get(dock, dock.root.geometry)
+        # Tk のスレッドに頼んだ処理が失敗しても、次の頼み事は届く (失敗で受け付けが止まり、試験ごと止まったことがある)
+        dock.call_in_tk(lambda: 1 / 0)
+        check("頼んだ処理が失敗しても、次の頼み事は届く", tk_get(dock, lambda: "届いた") == "届いた")
         dock.call_in_tk(dock.start_remote)
         for _ in range(100):
             if dock.remote_server:
@@ -188,6 +191,11 @@ def steps(dock: td.Dock) -> None:
         time.sleep(0.5)
         r = td.rect_of(dock.dock_hwnd)
         check("つなぐと、ドックが画面の外に出る", r[0] >= td.user32.GetSystemMetrics(78), f"left={r[0]}")
+        time.sleep(1.2)  # 知らせの窓は 1 秒ごとに相手を出し直す
+        notice = notice_state(dock)
+        check("PC の画面には「スマホで使用中」の知らせが出る (画面の中・相手のアドレス・取り戻すボタン)",
+              notice and notice["on_screen"] and any("127.0.0.1" in t for t in notice["texts"])
+              and any("PC で使う" in t for t in notice["texts"]), str(notice))
         reply = c.set_size(411, 772)
         time.sleep(0.5)
         img = c.full_frame()
@@ -258,7 +266,22 @@ def steps(dock: td.Dock) -> None:
         dock.call_in_tk(dock.save_session)
         saved = json.loads((HOME / "session.json").read_text(encoding="utf-8"))["geometry"]
         check("前回の位置には、元の位置を覚える", saved == original, saved)
+        check("切ると、知らせの窓も消える", notice_state(dock) is None)
         panel_steps(dock, token)
+
+        # 知らせの窓の「PC で使う」で取り戻す。待ち受けごと止める (つなぎ直してこない)
+        c = Client(dock.prefs["remote_token"])
+        c.full_frame()
+        time.sleep(1.0)
+        tk_get(dock, lambda: next(w for w in all_widgets(dock._remote_notice)
+                                  if isinstance(w, td.tk.Button) and "PC で使う" in w.cget("text")).invoke())
+        time.sleep(1.0)
+        now = tk_get(dock, dock.root.geometry)
+        check("「PC で使う」で、待ち受けが止まり、ドックが元の場所に戻り、知らせが消える",
+              dock.remote_server is None and not dock.prefs.get("remote") and now == original and notice_state(dock) is None,
+              f"待ち受け {dock.remote_server} ドック {now} 知らせ {notice_state(dock)}")
+        c.close()
+        c = None
     except Exception:
         traceback.print_exc()
         check("途中で止まらない", False)
@@ -294,9 +317,17 @@ def panel_steps(dock: td.Dock, token: str) -> None:
     if not nets:
         check("ほかのネットワークを選ぶ (この PC にネットワークが無いので飛ばす)", True)
         return
+    try:  # 人が使っている WinTabDock が、そのアドレスで待ち受けていることがある (ぶつかって待ち受けられない)。邪魔しない
+        socket.create_connection((nets[0][1], PORT), timeout=1).close()
+        check(f"ほかのネットワークを選ぶ ({nets[0][1]}:{PORT} はほかで使われているので飛ばす)", True)
+        return
+    except OSError:
+        pass
     dock.remote_settings.pop("host")  # toml に書いていない人として
     time.sleep(1.5)  # 画面が 1 秒ごとに並べ直す
     name, ip = nets[0]
+    radios = tk_get(dock, lambda: [(w.cget("value"), str(w.cget("state"))) for w in radio_buttons(dock._remote_panel)])
+    check("toml の host を消すと、アドレスを選べるようになる", radios and all(s == "normal" for _, s in radios), str(radios))
     tk_get(dock, lambda: next(w for w in radio_buttons(dock._remote_panel) if w.cget("value") == name).invoke())
     host = wait_host(dock, ip)
     check(f"「{name}」を選ぶと、そのアドレスで待ち受け直す", host == ip and dock.prefs.get("remote_network") == name,
@@ -314,6 +345,20 @@ def panel_steps(dock: td.Dock, token: str) -> None:
     host = wait_host(dock, "127.0.0.1")
     check("「この PC だけ」に戻せる", host == "127.0.0.1", str(host))
     dock.call_in_tk(dock._remote_panel.destroy)
+
+
+def notice_state(dock: td.Dock) -> dict | None:
+    """つないでいる間の知らせの窓。無ければ None。"""
+    def get():
+        win = dock._remote_notice
+        if not win or not win.winfo_exists():
+            return None
+        x, y, w, h = td.rect_of(int(win.wm_frame(), 16))
+        vx, vy = td.user32.GetSystemMetrics(76), td.user32.GetSystemMetrics(77)
+        vw, vh = td.user32.GetSystemMetrics(78), td.user32.GetSystemMetrics(79)
+        return {"on_screen": vx <= x and x + w <= vx + vw and vy <= y and y + h <= vy + vh and win.winfo_viewable(),
+                "rect": (x, y, w, h), "texts": widget_texts(win)}
+    return tk_get(dock, get)
 
 
 def wait_host(dock: td.Dock, want: str) -> str | None:

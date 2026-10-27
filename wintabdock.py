@@ -444,6 +444,7 @@ class Dock:
         self._remote_starting = False  # 待ち受けの準備中 (noVNC の取得など。別のスレッド)
         self._remote_how = ""  # 待ち受けるアドレスの決まり方 (画面に出す)
         self._remote_panel: tk.Toplevel | None = None
+        self._remote_notice: tk.Toplevel | None = None  # つないでいる間、PC の画面に出す知らせ
         self._remote_geometry: str | None = None  # 遠隔からつないでいる間 (ドックを画面の外に置く間) の、元の大きさ・位置
         self._tk_calls: queue.SimpleQueue = queue.SimpleQueue()  # 別のスレッドから Tk で動かしてほしいこと
         self.dock_hwnd = 0
@@ -869,6 +870,8 @@ class Dock:
             fn, done = self._tk_calls.get()
             try:
                 fn()
+            except Exception as e:  # 1 つの失敗で、この後の頼み事まで止めない (次の予約をせずに抜けて、以後すべて届かなかった)
+                self.remote_log(f"Tk のスレッドでの処理に失敗: {getattr(fn, '__name__', fn)}: {e!r}")
             finally:
                 done.set()
         self.root.after(20, self._drain_tk_calls)
@@ -916,7 +919,10 @@ class Dock:
                 server = remote.Server(remote.View(RemoteSource(self)), host, port, token, web_root, self.remote_log)
                 server.start()
             except OSError as e:
-                self.call_in_tk(lambda: self.remote_failed(f"{host}:{port} で待ち受けられませんでした。\n{e}"), wait=False)
+                # 文字にしてから渡す (e は except を抜けると消えるので、あとで動く lambda からは読めない)
+                msg = f"{host}:{port} で待ち受けられませんでした。\n{e}"
+                self.remote_log(msg.replace("\n", " "))
+                self.call_in_tk(lambda: self.remote_failed(msg), wait=False)
                 return
             self.remote_log(f"待ち受けを始めた {host}:{port}")
             self.call_in_tk(lambda: self._remote_started(server), wait=False)
@@ -1120,13 +1126,49 @@ class Dock:
             x = user32.GetSystemMetrics(76) + user32.GetSystemMetrics(78) + 100  # 仮想画面の右端の外
             self.root.geometry(f"+{x}+{user32.GetSystemMetrics(77)}")
             threading.Thread(target=self._keep_tk_awake, daemon=True).start()
+            self.show_remote_notice()
             self.remote_log("つながったので、ドックを画面の外に置いた")
         elif not on and self._remote_geometry:
+            if self._remote_notice and self._remote_notice.winfo_exists():
+                self._remote_notice.destroy()
+            self._remote_notice = None
             geometry, self._remote_geometry = self._remote_geometry, None
             self.root.geometry(geometry)
             self.root.update_idletasks()
             self.place_active(show=True)
             self.remote_log("切れたので、ドックを元の場所に戻した")
+
+    def show_remote_notice(self) -> None:
+        """つないでいる間、PC の画面の右下に出す小さな窓。ドックが画面の外にいることを知らせ、PC の側から取り戻せるようにする。
+        閉じられない (閉じると取り戻す手段が無くなる)。「PC で使う」は待ち受けごと止める (接続を切るだけだと、
+        noVNC がすぐにつなぎ直してきて、ドックがまた画面の外に出る)"""
+        win = tk.Toplevel(self.root)
+        win.title("WinTabDock")
+        win.attributes("-toolwindow", True, "-topmost", True)  # タスクバーにボタンを増やさない。ほかの窓の後ろに隠れない
+        win.resizable(False, False)
+        win.protocol("WM_DELETE_WINDOW", lambda: None)
+        self._remote_notice = win
+        tk.Label(win, text="スマホで使用中", font=("", 10, "bold"), anchor=tk.W).pack(fill=tk.X, padx=12, pady=(10, 0))
+        who = tk.Label(win, anchor=tk.W, justify=tk.LEFT, fg="#555555")
+        who.pack(fill=tk.X, padx=12)
+        tk.Label(win, text="ドックは画面の外に移しています。\nスマホを切ると、元の場所に戻ります。", anchor=tk.W,
+                 justify=tk.LEFT, fg="#555555").pack(fill=tk.X, padx=12, pady=(4, 8))
+        tk.Button(win, text="PC で使う (スマホから使うのを止める)", command=self.stop_remote, bg=TAB_ACTIVE, fg="#ffffff",
+                  activebackground="#5b21b6", activeforeground="#ffffff", relief=tk.RAISED, bd=1, padx=12,
+                  cursor="hand2").pack(fill=tk.X, padx=12, pady=(0, 12))
+
+        def refresh() -> None:
+            if not win.winfo_exists():
+                return
+            peers = self.remote_server.peers() if self.remote_server else []
+            who.config(text="つないでいる: " + ("、".join(peers) or "-"))
+            win.after(1000, refresh)
+
+        refresh()
+        win.update_idletasks()
+        area = wintypes.RECT()
+        user32.SystemParametersInfoW(0x30, 0, ctypes.byref(area), 0)  # SPI_GETWORKAREA (主の画面の、タスクバーを除いた所)
+        win.geometry(f"+{area.right - win.winfo_width() - 24}+{area.bottom - win.winfo_height() - 60}")
 
     def remote_resize(self, w: int, h: int) -> None:
         """遠隔の画面の大きさに、ドックの内側を合わせる (ツールは place_active でついてくる)。"""

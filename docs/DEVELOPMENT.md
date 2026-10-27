@@ -85,7 +85,7 @@ uv run check_close.py PortWho RepoTether         # × を押したとき: 一緒
 「設定」の「スマホから使う」で入り切りする (入れたかは settings.json の `remote` に覚え、次の起動でも始める)。
 
 ```sh
-uv run check_remote.py           # ドックに試験用の窓を 2 つ取り込み、noVNC と同じ WebSocket でつなぐ。設定の画面と QR コードも (29 項目)
+uv run check_remote.py           # ドックに試験用の窓を 2 つ取り込み、noVNC と同じ WebSocket でつなぐ。設定の画面と QR コード、つないでいる間の知らせの窓も (30 項目)
 uv run check_remote_android.py   # Android の実機 (USB デバッグ) の Chrome から (9 項目)
 uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi で PC のこのアドレスにつなぐ (USB は試験の操作だけ。10 項目)
 ```
@@ -108,6 +108,14 @@ uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi �
   遠隔のスレッドから Tk に触らない (Tk の仕事は `call_in_tk` で Tk のスレッドに頼む)
 - つないでいる間はドックを画面の右の外に置く (下の「押す (Tk)」の重なりの件)。切れたら元の大きさ・位置に戻す。
   前回の位置 (session.json) には元の位置を覚えるので、つないだまま落ちても次は画面の上に開く
+- つないでいる間は、PC の画面の右下に知らせの窓 (`show_remote_notice`。最前面・タスクバーに出さない・閉じられない) を出す。
+  ドックが急に消えたように見え、PC の側から取り戻す手段も無かったため。「PC で使う」は待ち受けごと止める
+  (接続を切るだけだと、noVNC が `reconnect=true` ですぐにつなぎ直してきて、ドックがまた画面の外に出る)
+- **`call_in_tk` で頼んだ処理が例外を出すと、以後の頼み事がすべて届かなくなっていた。** `_drain_tk_calls` が次の予約
+  (`after`) をせずに抜けていた。待ち受けに失敗したときの知らせが NameError (`except ... as e` の `e` を後で動く lambda から
+  読んだ) を出し、そこで試験ごと止まって見つかった。例外は記録 (remote.log) に書いて続ける
+- 試験 (`check_remote.py`) の Wi-Fi の項目は、人が使っている WinTabDock がそのアドレスのポートで待ち受けていたら飛ばす
+  (ぶつかって待ち受けられず、試験が落ちた)
 - 入れるのは、URL の合言葉 (`?token=`。settings.json の `remote_token`) が合い、`Origin` が `http://<Host>` の WebSocket だけ。
   トップのページ (/) は見せない。配るファイルの道は英数字と `. _ - /` だけ (`..` も断る)。ファイルに触れる前に確かめないと、
   `\\相手\共有` の道で相手の PC へつなぎに行き、サインインの資格情報 (NTLM) を渡しうる。
