@@ -154,6 +154,7 @@ class Client:
 def steps(dock: td.Dock) -> None:
     app1, h1 = ck.start_app(f"r{os.getpid()}a")
     app2, h2 = ck.start_app(f"r{os.getpid()}b", 600)
+    edit_app = start_edit_app(f"r{os.getpid()}e")
     c = None
     try:
         dock.call_in_tk(lambda: dock.adopt("app1", h1))
@@ -222,12 +223,20 @@ def steps(dock: td.Dock) -> None:
         title = ck.wait_title(h1, "text=okあ ")
         check("文字と日本語を打てる", "text=okあ " in title, title)
         # 絵文字 (U+1F366)。noVNC は代理対の片方ずつ 2 回に分けて送ってくることがあり、片方だけを文字にしようとして接続ごと切れた
+        keys = record_keys(dock)
         for ks in (0x0100D83C, 0x0100DF66, 0x0101F366):  # 片方ずつ 2 回 + 1 つの keysym
             c.key(ks)
         title = ck.wait_title(h1, "text=okあ🍦🍦 ")
         alive = bool(dock.remote_server and dock.remote_server.peers())
         check("絵文字を打てる (片方ずつ届いても 1 文字になり、接続が切れない)", "text=okあ🍦🍦 " in title and alive,
-              f"{title} 接続 {alive}")
+              f"{title} 接続 {alive} / 届いたキー {' '.join(keys)} / 渡せなかった {getattr(dock.remote_server.view.input, 'send_failures', '-')}")
+        # スマホの日本語の入力は、変換中の「に ほ ん」を送ってから、確定で BackSpace 3 回と「日 本」を送ってくる。
+        # BackSpace の後の文字が先に処理されると「にほん日本」から 3 文字消えて「にほ」が残った (Mery で)
+        for ks in (0x0100306B, 0x0100307B, 0x01003093, 0xFF08, 0xFF08, 0xFF08, 0x010065E5, 0x0100672C):
+            c.key(ks)
+        title = ck.wait_title(h1, "text=okあ🍦🍦日本 ")
+        check("日本語の入力の変換 (変換中の文字を BackSpace で消してから確定の文字) が、その順に届く",
+              "text=okあ🍦🍦日本 " in title, title)
 
         mapped = tk_get(dock, lambda: (dock.menu_button.winfo_ismapped(), dock.settings_button.winfo_ismapped(),
                                        dock.zoom_out_button.winfo_ismapped(), dock.zoom_in_button.winfo_ismapped()))
@@ -309,6 +318,7 @@ def steps(dock: td.Dock) -> None:
         c.tap(round((tx + 140) * s), round((ty + 110) * s))
         title = ck.wait_title(h2, "count=1")
         check("縮めた画面の上でも押せる", "count=1" in title, title)
+        edit_steps(dock, c, edit_app)
 
         c.close()
         c = None
@@ -342,7 +352,7 @@ def steps(dock: td.Dock) -> None:
             c.close()
         # 試験用の窓を先に閉じてから、ドックを閉じる。ドックを閉じるとこのプロセスが終わり、このスレッドも止まる
         # (先にドックを閉じていたら、窓を閉じる前に止まり、試験用の窓が 90 個残った)
-        ck.close_apps([(app1, h1), (app2, h2)])
+        ck.close_apps([(app1, h1), (app2, h2), edit_app])
         dock.call_in_tk(dock.stop_remote)
         dock.call_in_tk(dock.quit, wait=False)
 
@@ -438,6 +448,68 @@ def radio_buttons(w) -> list:
 
 def widget_texts(w) -> list[str]:
     return [str(x.cget("text")) for x in all_widgets(w) if isinstance(x, (td.tk.Label, td.tk.Button, td.tk.Radiobutton))]
+
+
+def start_edit_app(tag: str):
+    """Tk でない試験用の窓 (experiments/edit_testapp.py。Windows の EDIT 部品だけ) を起動して (プロセス, 窓) を返す。
+    起動役 (uv の python.exe) と窓を持つプロセスが別なので、タイトルで探す"""
+    import subprocess
+    title = f"edit-testapp {tag}"
+    proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve().parent / "experiments" / "edit_testapp.py"), tag])
+    for _ in range(100):
+        found = [h for h in all_windows() if window_class(h) == "EditTestApp" and td.window_title(h) == title]
+        if found:
+            return proc, found[0]
+        time.sleep(0.1)
+    raise RuntimeError(f"{title} の窓が出ない")
+
+
+def edit_steps(dock: td.Dock, c, edit_app) -> None:
+    """Tk でない窓 (EDIT。BackSpace などを WM_CHAR で処理する作り) に、スマホの日本語の入力と同じ並びで打つ。
+    Mery で、BackSpace の後の文字が先に処理されて「にほ」が残った (受け取りの列に置いていたので、翻訳で後ろに作られる
+    WM_CHAR(8) に追い越された)"""
+    _, he = edit_app
+    dock.call_in_tk(lambda: dock.adopt("edit", he))
+    time.sleep(1.0)
+    tab_x, tab_y = button_pos(dock, dock.tabs[-1].button_hwnd)
+    c.tap(tab_x, tab_y)
+    time.sleep(1.5)
+    view = dock.remote_server.view
+    _, tx, ty, tw, th = RemoteSource_layers(dock)[1]
+    s = view.scale
+    c.tap(round((tx + tw // 2) * s), round((ty + th // 2) * s))
+    time.sleep(0.5)
+    seq = [ord("a"), ord("b"), ord("c"), 0xFF0D,
+           0x0100306B, 0x0100307B, 0x01003093, 0x01003054, 0xFF08, 0xFF08, 0xFF08, 0xFF08,  # に ほ ん ご → 消す
+           0x010065E5, 0x0100672C, 0x01008A9E, 0x0100D83C, 0x0100DF66,  # 日 本 語 🍦 (代理対の片方ずつ)
+           0xFF09, ord("x"), 0xFF08, 0xFF51, 0xFFFF]  # Tab x BackSpace ← Delete (Tab も消える)
+    for ks in seq:
+        c.key(ks)
+    time.sleep(1.0)
+    edit = remote.child_at(he, 20, 20)[0]
+    n = td.user32.SendMessageW(edit, 0x000E, 0, 0)  # WM_GETTEXTLENGTH
+    buf = ctypes.create_unicode_buffer(n + 1)
+    ctypes.windll.user32.SendMessageW(edit, 0x000D, n + 1, buf)  # WM_GETTEXT
+    want = "abc\r\n日本語🍦"
+    check("Tk でない窓 (EDIT) にも、日本語の変換・絵文字・Enter・Tab・BackSpace・矢印・Delete が送った順に効く",
+          buf.value == want, f"{buf.value!r} / 期待 {want!r}")
+
+
+def record_keys(dock: td.Dock) -> list[str]:
+    """届いたキーと、渡した先の窓 (Tk か) を控える。落ちたときに出す。"""
+    keys: list[str] = []
+    inp = dock.remote_server.view.input
+    orig = inp.key
+
+    def key(down: bool, keysym: int) -> None:
+        top = inp.view.source.key_window()
+        dest = remote.focus_of(top) if top else 0
+        if down:
+            keys.append(f"{keysym:#x}→{dest}{'(Tk)' if dest and getattr(remote, 'is_tk', lambda h: False)(dest) else ''} 前半={getattr(inp, 'high_surrogate', 0):#x}")
+        orig(down, keysym)
+
+    inp.key = key
+    return keys
 
 
 def old_zoom_buttons(img) -> int:

@@ -48,6 +48,22 @@ def tk_get(dock: td.Dock, fn):
     return box[0] if box else None
 
 
+def record_keys(dock: td.Dock) -> list[str]:
+    """スマホから届いたキー (押した分) を控える。落ちたときに、noVNC が何を送ってきたかを出すため。"""
+    keys: list[str] = []
+    inp = dock.remote_server.view.input
+    orig = inp.key
+
+    def key(down: bool, keysym: int) -> None:
+        if down:
+            ch = remote.keysym_char(keysym)
+            keys.append(ch if ch and ch.isprintable() else f"{keysym:#x}")
+        orig(down, keysym)
+
+    inp.key = key
+    return keys
+
+
 def dock_button_pos(dock: td.Dock, button) -> tuple[int, int]:
     """ドックの帯のボタンの真ん中の、スマホの画面 (CSS の px) での位置。縮めて見せているときはその倍率を掛ける。"""
     x, y, w, h = td.rect_of(tk_get(dock, button.winfo_id))
@@ -80,7 +96,13 @@ def steps(dock: td.Dock) -> None:
         va.adb("shell", "am", "start", "-a", "android.intent.action.VIEW", "-p", "com.android.chrome", "-d", f"'{url}'")
         tab_info = va.find_tab(30, LAN or "127.0.0.1", old)
         tab = va.Tab(tab_info["webSocketDebuggerUrl"])
-        time.sleep(4)
+        # つながるまで待つ (決め打ちの 4 秒では足りないことがあった)。前に開いたまま古い合言葉でつなぎ直し続けているタブが
+        # スマホにあると、Chrome が同じ相手への接続を待たせ、20 秒以上かかった
+        t0 = time.monotonic()
+        while not dock.remote_server.peers() and time.monotonic() - t0 < 60:
+            time.sleep(0.5)
+        print(f"つながるまで {time.monotonic() - t0:.1f} 秒")
+        time.sleep(3)
 
         vw, vh, dpr = tab.js("[innerWidth, innerHeight, devicePixelRatio]")
         print(f"縦向き: ブラウザの中は {vw}x{vh}、devicePixelRatio {dpr}")
@@ -103,10 +125,19 @@ def steps(dock: td.Dock) -> None:
         time.sleep(0.5)
         tab.js("document.getElementById('noVNC_keyboardinput').focus()")
         time.sleep(0.5)
+        keys = record_keys(dock)
         tab.call("Input.insertText", text="abc")
+        # 「abc」の直後 (0 秒) に変換を始めると、noVNC 自身が最初の「に」を 2 回送ってきた (人の手では間があく)
+        time.sleep(0.5)
+        # 日本語の入力と同じく、変換中の文字を出してから確定する。noVNC は変換中の文字を送り、確定で BackSpace で消してから
+        # 確定の文字を送ってくる (Mery で順番が崩れ、「にほ」が残ったことがある)
+        for comp in ("に", "にほ", "にほん", "にほんご"):
+            tab.call("Input.imeSetComposition", text=comp, selectionStart=len(comp), selectionEnd=len(comp))
+            time.sleep(0.1)
         tab.call("Input.insertText", text="日本語")
         title = ck.wait_title(h1, "text=abc日本語 ")
-        ck.check("文字と日本語の確定文字を打てる", "text=abc日本語 " in title, title)
+        ck.check("文字と、日本語の変換を経た確定文字を打てる", "text=abc日本語 " in title,
+                 f"{title} / 届いたキー {' '.join(keys)}")
         tab.call("Input.insertText", text="🍦")  # 絵文字で接続が切れたことがある
         title = ck.wait_title(h1, "text=abc日本語🍦 ")
         time.sleep(1.0)

@@ -84,8 +84,12 @@ PW_CLIENTONLY, PW_RENDERFULLCONTENT = 0x1, 0x2
 SRCCOPY, HALFTONE = 0x00CC0020, 4
 CWP_SKIPINVISIBLE, CWP_SKIPTRANSPARENT = 0x1, 0x4
 SMTO_ABORTIFHUNG = 0x0002
+# 押す・打つを相手が処理し終えるのを待つ長さ。時間切れになったものは捨てられ、後からも処理されない。500ms では、
+# Tk が絵文字を最初に描くとき (約 1 秒止まる) や縮めた直後に、次の絵文字やボタンを押したことが抜けた。
+# 固まった相手は SMTO_ABORTIFHUNG ですぐ諦めるので、長く待つのは「忙しいが動いている」相手だけ
+SEND_TIMEOUT_MS = 5000
 WM_ACTIVATE, WA_ACTIVE, WM_SETFOCUS = 0x0006, 1, 0x0007
-WM_KEYDOWN, WM_KEYUP, WM_CHAR = 0x0100, 0x0101, 0x0102
+WM_KEYDOWN, WM_KEYUP, WM_CHAR, WM_UNICHAR = 0x0100, 0x0101, 0x0102, 0x0109
 WM_MOUSEMOVE, WM_MOUSEWHEEL = 0x0200, 0x020A
 BUTTON_MSGS = {1: (0x0201, 0x0202, 0x0001), 2: (0x0207, 0x0208, 0x0010), 4: (0x0204, 0x0205, 0x0002)}  # 左・中・右
 
@@ -296,6 +300,8 @@ class WindowInput:
         self.key_child = 0
         self.holding = False
         self.blocked = False  # 押してはいけない所を押した。離すまで何も送らない
+        self.high_surrogate = 0  # 絵文字の代理対の前半 (後半が来るまで控える)
+        self.send_failures: list = []  # 渡せなかったもの (メッセージ, 値, GetLastError)
 
     def pointer(self, mask: int, x: int, y: int) -> None:
         with self.lock:
@@ -365,13 +371,13 @@ class WindowInput:
                     state[vk] = 0x80 if mask & bit else 0
                 _u.SetKeyboardState(state)
             for msg, wp, lp in msgs:
-                _u.SendMessageTimeoutW(child, msg, wp, lp, SMTO_ABORTIFHUNG, 500, None)
+                _u.SendMessageTimeoutW(child, msg, wp, lp, SMTO_ABORTIFHUNG, SEND_TIMEOUT_MS, None)
         finally:
             if attached:
                 _u.AttachThreadInput(me, tid, False)
         if pressing:
-            _u.SendMessageTimeoutW(top, WM_ACTIVATE, WA_ACTIVE, 0, SMTO_ABORTIFHUNG, 500, None)
-            _u.SendMessageTimeoutW(child, WM_SETFOCUS, 0, 0, SMTO_ABORTIFHUNG, 500, None)
+            _u.SendMessageTimeoutW(top, WM_ACTIVATE, WA_ACTIVE, 0, SMTO_ABORTIFHUNG, SEND_TIMEOUT_MS, None)
+            _u.SendMessageTimeoutW(child, WM_SETFOCUS, 0, 0, SMTO_ABORTIFHUNG, SEND_TIMEOUT_MS, None)
 
     def key(self, down: bool, keysym: int) -> None:
         vk = SPECIAL_KEYS.get(keysym)
@@ -380,19 +386,46 @@ class WindowInput:
         if (vk is None and ch is None) or not top:
             return
         dest = focus_of(top) or self.key_child or top
+
+        # 打つものは、相手の受け取りの列に置かず (PostMessage)、1 つずつ渡して処理し終えるのを待つ (SendMessage)。
+        # 列に置くと順番が崩れた。BackSpace の WM_KEYDOWN は、相手が受け取って翻訳した時に WM_CHAR(8) が列の後ろに作られ、
+        # 先に置いた文字に追い越される。スマホの日本語の入力は、変換中の「に ほ ん」を送ってから、確定で BackSpace 3 回と
+        # 「日 本」を送ってくるので、Mery (WM_CHAR(8) で消す) では「にほん日本」から 3 文字消えて「にほ」が残った。Tk は
+        # WM_KEYDOWN の時に列から次の WM_CHAR を拾ってそのキーの文字にするので、「日」を拾って BackSpace と一緒に消した
+        def send(msg: int, wp: int, lp: int) -> None:
+            if not _u.SendMessageTimeoutW(dest, msg, wp, lp, SMTO_ABORTIFHUNG, SEND_TIMEOUT_MS, None):
+                self.send_failures = self.send_failures[-19:] + [(hex(msg), hex(wp), ctypes.get_last_error())]
+
         if vk:
             if vk in (0x10, 0x11, 0x12):
                 return  # 修飾キーは窓へのメッセージでは効かない (相手は本物のキーボードの状態を読む)
-            scan = _u.MapVirtualKeyW(vk, 0)
-            _u.PostMessageW(dest, WM_KEYDOWN if down else WM_KEYUP, vk, 1 | scan << 16 | (0 if down else 0xC0000000))
+            lp = 1 | _u.MapVirtualKeyW(vk, 0) << 16
+            send(WM_KEYDOWN if down else WM_KEYUP, vk, lp if down else lp | 0xC0000000)
+            if down and vk in CHAR_KEYS and not is_tk(dest):
+                # 渡したキーは翻訳を通らないので、文字を生むキー (BackSpace・Tab・Enter・Esc) はその文字も渡す。
+                # Tk には渡さない (Tk は WM_KEYDOWN だけで動き、Text 部品では Tab や Enter が二重に入りうる)
+                send(WM_CHAR, vk, lp)
         elif down:
-            # WM_CHAR は UTF-16 の 1 単位ずつ。BMP の外の文字 (絵文字) は代理対の 2 つに分けて送る (Windows 自身もそうする)。
-            # noVNC は絵文字を、1 つの keysym (U+1F366) でなく、代理対の片方ずつ 2 回に分けて送ってくることがある。
-            # 片方だけの文字は encode で例外になり、接続ごと切れた。片方ずつならそのまま送れば、相手が 2 つをつなげる
+            # noVNC は絵文字 (U+1F366 など) を、1 つの keysym でなく、代理対の片方ずつ 2 回に分けて送ってくる。
+            # 前半を控えて、後半が来たら 1 文字にする (片方だけの文字を encode しようとして例外になり、接続ごと切れたことがある)
             cp = ord(ch)
-            units = [cp] if cp <= 0xFFFF else [0xD800 | (cp - 0x10000) >> 10, 0xDC00 | (cp - 0x10000) & 0x3FF]
-            for unit in units:
-                _u.PostMessageW(dest, WM_CHAR, unit, 1)
+            if 0xD800 <= cp <= 0xDBFF:
+                self.high_surrogate = cp
+                return
+            if 0xDC00 <= cp <= 0xDFFF:
+                if not self.high_surrogate:
+                    return
+                cp = 0x10000 + ((self.high_surrogate - 0xD800) << 10) + (cp - 0xDC00)
+            self.high_surrogate = 0
+            if cp <= 0xFFFF:
+                send(WM_CHAR, cp, 1)
+            elif is_tk(dest):
+                # Tk は代理対の 2 つを別々に渡されると、つなげそこねた (前半が落ちて別の文字になった)。1 文字まるごと渡す
+                send(WM_UNICHAR, cp, 1)
+            else:
+                # WM_CHAR は UTF-16 の 1 単位ずつ。代理対の 2 つに分けて渡す (Windows 自身もそうする。Mery で確かめた)
+                send(WM_CHAR, 0xD800 | (cp - 0x10000) >> 10, 1)
+                send(WM_CHAR, 0xDC00 | (cp - 0x10000) & 0x3FF, 1)
 
 
 def child_at(hwnd: int, x: int, y: int) -> tuple[int, int, int]:
@@ -420,6 +453,16 @@ SPECIAL_KEYS = {  # X11 の keysym → 仮想キー
     0xFFE1: 0x10, 0xFFE2: 0x10, 0xFFE3: 0x11, 0xFFE4: 0x11, 0xFFE9: 0x12, 0xFFEA: 0x12,
     **{0xFFBE + i: 0x70 + i for i in range(12)},  # F1-F12
 }
+
+
+CHAR_KEYS = {0x08, 0x09, 0x0D, 0x1B}  # 文字を生む仮想キー (BackSpace・Tab・Enter・Esc)。文字の値は仮想キーと同じ
+
+
+def is_tk(hwnd: int) -> bool:
+    """Tk の窓か (窓の種類の名前が TkChild・TkTopLevel など)。"""
+    buf = ctypes.create_unicode_buffer(32)
+    _u.GetClassNameW(hwnd, buf, 32)
+    return buf.value.startswith("Tk")
 
 
 def keysym_char(keysym: int) -> str | None:
