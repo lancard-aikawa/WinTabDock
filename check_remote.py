@@ -169,6 +169,12 @@ def steps(dock: td.Dock) -> None:
         token = dock.prefs["remote_token"]
         good_origin = f"http://127.0.0.1:{PORT}"
         check("トップのページ (/) は見せない", http_status("/") == 404)
+        check("noVNC のページは配る", http_status("/vnc.html") == 200)
+        bad = ["/\\\\127.0.0.1\\c$\\x", "/C:/Windows/win.ini", "/../remote.log", "/app/../../remote.log", "/%5C%5Cx"]
+        check("noVNC のフォルダの外 (\\\\相手\\共有・C:・..) は配らない (ファイルに触れる前に断る)",
+              all(http_status(p) == 404 for p in bad)
+              and not any(remote._SAFE_PATH.fullmatch(p.lstrip("/")) and ".." not in p.split("/") for p in bad[:2]),
+              ", ".join(f"{p}={http_status(p)}" for p in bad))
         check("合言葉が無いと断る", ws_status("/websockify", good_origin) == 403)
         check("合言葉が違うと断る", ws_status("/websockify?token=wrong", good_origin) == 403)
         check("よそのサイト (Origin) からは断る", ws_status(f"/websockify?token={token}", "http://evil.example") == 403)

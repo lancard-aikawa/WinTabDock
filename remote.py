@@ -16,6 +16,7 @@ import ctypes
 import hashlib
 import io
 import mimetypes
+import re
 import secrets
 import socket
 import struct
@@ -665,6 +666,9 @@ class Session:
 
 # ── サーバ ───────────────────────────────────────────────────────────────────
 
+_SAFE_PATH = re.compile(r"[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*")  # 配るファイルの道 (noVNC のファイル名の文字だけ)
+
+
 def new_token() -> str:
     return secrets.token_urlsafe(18)
 
@@ -802,8 +806,12 @@ class Server:
         if path == "/":
             sock.sendall(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             return  # 合言葉の入った URL を使ってもらう (トップからは入れない)
-        file = (self.web_root / path.lstrip("/")).resolve()
-        if file.is_file() and file.is_relative_to(self.web_root.resolve()):
+        # ファイルに触れる前に道を確かめる。`\` や `C:` が混じると、noVNC のフォルダの外 (\\相手\共有 なら、
+        # 相手の PC への接続とサインインの資格情報の送信) を調べに行く。noVNC のファイル名に使う文字だけを通す
+        rel = path.lstrip("/")
+        ok = bool(_SAFE_PATH.fullmatch(rel)) and ".." not in rel.split("/")
+        file = (self.web_root / rel).resolve() if ok else None
+        if file and file.is_file() and file.is_relative_to(self.web_root.resolve()):
             body, status = file.read_bytes(), "200 OK"
             ctype = {".js": "text/javascript", ".mjs": "text/javascript"}.get(file.suffix) or \
                 mimetypes.guess_type(file.name)[0] or "application/octet-stream"
