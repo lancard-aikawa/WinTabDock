@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["pillow", "numpy", "websocket-client"]
+# dependencies = ["pillow", "numpy", "websocket-client", "zxing-cpp"]
 # ///
 """遠隔 (スマホのブラウザから使う。remote.py) を、ドックを開いて確かめる。
 
@@ -285,6 +285,8 @@ def panel_steps(dock: td.Dock, token: str) -> None:
     check("toml で決めているときは、アドレスを選べない", radios and all(s == "disabled" for _, s in radios), str(radios))
     check("URL の合言葉は画面に出さない (伏せ字)", url_shown and token not in url_shown[0] and "********" in url_shown[0],
           url_shown[0] if url_shown else "-")
+    check("この PC だけで待ち受けているときは、QR コードを出さない", not read_qr(OUT / "remote-3-panel.png"),
+          str(read_qr(OUT / "remote-3-panel.png")))
 
     # Wi-Fi を選ぶ (ファイアウォールで許可した、家のネットワーク)。仮想のネットワーク (VirtualBox・WSL) で待ち受けると、
     # 許可の決まりが無いので Windows の確認が人の画面に出る
@@ -304,6 +306,10 @@ def panel_steps(dock: td.Dock, token: str) -> None:
     shot(dock, "remote-4-panel-lan.png")
     check("画面のアドレスも変わる", any(f"待ち受け中  {ip}:" in t for t in texts),
           " / ".join(t for t in texts if "待ち受け" in t))
+    codes = read_qr(OUT / "remote-4-panel-lan.png")
+    url = dock.remote_server.url
+    check("QR コードを読むと、合言葉入りの URL になる", codes == [url],
+          str([c.replace(token, "<合言葉>") for c in codes]))
     tk_get(dock, lambda: next(w for w in radio_buttons(dock._remote_panel) if w.cget("value") == "loopback").invoke())
     host = wait_host(dock, "127.0.0.1")
     check("「この PC だけ」に戻せる", host == "127.0.0.1", str(host))
@@ -331,6 +337,12 @@ def radio_buttons(w) -> list:
 
 def widget_texts(w) -> list[str]:
     return [str(x.cget("text")) for x in all_widgets(w) if isinstance(x, (td.tk.Label, td.tk.Button, td.tk.Radiobutton))]
+
+
+def read_qr(path: Path) -> list[str]:
+    """画像の中の QR コードを読む (スマホのカメラの代わり)。"""
+    import zxingcpp
+    return [b.text for b in zxingcpp.read_barcodes(Image.open(path)) if b.format == zxingcpp.BarcodeFormat.QRCode]
 
 
 def shot(dock: td.Dock, name: str) -> None:

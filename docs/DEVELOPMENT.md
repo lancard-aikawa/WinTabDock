@@ -85,7 +85,7 @@ uv run check_close.py PortWho RepoTether         # × を押したとき: 一緒
 「設定」の「スマホから使う」で入り切りする (入れたかは settings.json の `remote` に覚え、次の起動でも始める)。
 
 ```sh
-uv run check_remote.py           # ドックに試験用の窓を 2 つ取り込み、noVNC と同じ WebSocket でつなぐ。設定の画面も (27 項目)
+uv run check_remote.py           # ドックに試験用の窓を 2 つ取り込み、noVNC と同じ WebSocket でつなぐ。設定の画面と QR コードも (29 項目)
 uv run check_remote_android.py   # Android の実機 (USB デバッグ) の Chrome から (9 項目)
 uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi で PC のこのアドレスにつなぐ (USB は試験の操作だけ。10 項目)
 ```
@@ -117,6 +117,10 @@ uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi �
   表示名 (Wi-Fi など) ごとに並べ、**アドレスでなく名前で覚える** (ルーターがアドレスを変えても選び直さなくてよい)。
   選び直すと待ち受けをやり直す (つないでいるスマホは切れて、noVNC が自分でつなぎ直す)。画面は 1 秒ごとに状態・相手を出し直す。
   URL の合言葉は画面では伏せる (コピーは合言葉入り)
+- 画面の右に URL の QR コードを出す (127.0.0.1 で待ち受けているときは出さない)。作るのは同梱の `qrcodegen.py`
+  (Project Nayuki 1.8.0、MIT。PyPI の wheel から取り出したそのまま。SHA256 `b089855c...dcc84`)。exe に Pillow を入れていない
+  ので、`tk.PhotoImage` に 1 マス 1 画素で描いて `zoom` で広げる。画面に映すものなので誤り訂正は LOW にしてマスを粗くした。
+  試験は画面を撮って zxing-cpp で読み、合言葉入りの URL と一致するかを見る (本物のスマホのカメラでは読ませていない)
 - ドックで遠隔から押せるのはタブだけ。「+ 起動」「設定」やタブの右クリックはメニューを出し、メニューは別の窓なので遠隔からは見えず、
   開いている間ドックが止まる。押すのを断ったら、離すまで何も送らない (押した状態の移動を送るだけでも、Tk は押されたことにして
   「+ 起動」のメニューが開いた)

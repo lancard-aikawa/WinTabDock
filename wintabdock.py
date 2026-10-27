@@ -33,6 +33,7 @@ from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
 
+import qrcodegen  # QR コードを作る (Project Nayuki、MIT。1 ファイルを同梱)
 import remote
 
 # ── Win32 ────────────────────────────────────────────────────────────────────
@@ -411,7 +412,18 @@ def owned_popups(hwnd: int) -> list[int]:
     return found[::-1]  # EnumWindows は手前から。重ねるのは奥から
 
 
-TAB_BG, TAB_ACTIVE, TAB_FG, TAB_FG_DIM, BAR_BG = "#252542", "#7c3aed", "#ffffff", "#9a9ab8", "#1a1a2e"
+def qr_photo(text: str, size: int = 240) -> tk.PhotoImage:
+    """text の QR コードの画像 (一辺が size 以下)。周りに 4 マス分の白い余白を付ける (カメラが読むのに要る)。
+    画面に映して読むので汚れや欠けは無い。誤り訂正は一番低くして、マスを粗く (大きく) する"""
+    qr = qrcodegen.QrCode.encode_text(text, qrcodegen.QrCode.Ecc.LOW)
+    n = qr.get_size() + 8
+    img = tk.PhotoImage(width=n, height=n)
+    img.put(" ".join("{" + " ".join("#000000" if qr.get_module(x, y) else "#ffffff" for x in range(-4, n - 4)) + "}"
+                     for y in range(-4, n - 4)))
+    return img.zoom(max(1, size // n))
+
+
+TAB_BG, TAB_ACTIVE, TAB_FG, TAB_FG_DIM, BAR_BG ="#252542", "#7c3aed", "#ffffff", "#9a9ab8", "#1a1a2e"
 BAR_EDGE = "#7c3aed"  # 帯の下の区切り線と「設定」の枠 (アイコンの縁取りと同系の紫)
 
 
@@ -983,6 +995,16 @@ class Dock:
         bar.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=10)
         tk.Button(bar, text="閉じる", width=10, command=win.destroy, **hand).pack(side=tk.RIGHT)
 
+        # 右に QR コード (スマホのカメラで読めば URL をコピーして送らずに開ける)。出し入れで画面の大きさが変わらないよう幅を決めておく
+        qr_box = tk.Frame(win, width=260, height=310)
+        qr_box.pack_propagate(False)
+        qr_box.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 12), pady=(10, 0))
+        qr_label = tk.Label(qr_box, bd=0)
+        qr_label.pack(side=tk.TOP)
+        qr_note = tk.Label(qr_box, justify=tk.CENTER, fg="#555555", wraplength=250)
+        qr_note.pack(side=tk.TOP, pady=(6, 0))
+        qr_shown = [None]  # いま出している QR の URL
+
         body = tk.Frame(win)
         body.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=12, pady=(10, 0))
         head = tk.Frame(body)
@@ -1072,6 +1094,14 @@ class Dock:
             url_var.set(self.remote_server.url.replace(self.remote_server.token, "********") if on else "(待ち受けていません)")
             copy.config(state=tk.NORMAL if on else tk.DISABLED)
             renew.config(state=tk.NORMAL if on else tk.DISABLED)
+            want = self.remote_server.url if on and host != "127.0.0.1" else ""
+            if want != qr_shown[0]:
+                qr_shown[0] = want
+                qr_label.image = qr_photo(want) if want else None  # 画像は手元で持っておかないと消える
+                qr_label.config(image=qr_label.image or "")
+            qr_note.config(text="スマホのカメラで読むと開きます。\n合言葉が入っているので、人に見せないでください" if want else
+                           "この PC だけで待ち受けているので、\nQR コードは出しません" if on else
+                           "待ち受けを始めると、\nここに QR コードが出ます")
             win.after(1000, refresh)
 
         refresh()
