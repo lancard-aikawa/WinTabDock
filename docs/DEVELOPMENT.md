@@ -85,7 +85,7 @@ uv run check_close.py PortWho RepoTether         # × を押したとき: 一緒
 「設定」の「スマホから使う」で入り切りする (入れたかは settings.json の `remote` に覚え、次の起動でも始める)。
 
 ```sh
-uv run check_remote.py           # ドックに試験用の窓を 2 つ取り込み、noVNC と同じ WebSocket でつなぐ (21 項目)
+uv run check_remote.py           # ドックに試験用の窓を 2 つ取り込み、noVNC と同じ WebSocket でつなぐ。設定の画面も (27 項目)
 uv run check_remote_android.py   # Android の実機 (USB デバッグ) の Chrome から (9 項目)
 uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi で PC のこのアドレスにつなぐ (USB は試験の操作だけ。10 項目)
 ```
@@ -111,7 +111,12 @@ uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi �
 - 入れるのは、URL の合言葉 (`?token=`。settings.json の `remote_token`) が合い、`Origin` が `http://<Host>` の WebSocket だけ。
   トップのページ (/) は見せない。配るファイルの道は英数字と `. _ - /` だけ (`..` も断る)。ファイルに触れる前に確かめないと、
   `\\相手\共有` の道で相手の PC へつなぎに行き、サインインの資格情報 (NTLM) を渡しうる。
-  「合言葉を作り直す」で前の URL を使えなくする。待ち受けるアドレスは wintabdock.toml の `[remote] host` (無ければ Tailscale のアドレス、それも無ければ 127.0.0.1)。noVNC は初回に GitHub から取る (版とハッシュを固定)
+  「合言葉を作り直す」で前の URL を使えなくする。noVNC は初回に GitHub から取る (版とハッシュを固定)
+- 待ち受けるアドレスは、wintabdock.toml の `[remote] host` > 「スマホから使う: アドレスと状態...」の画面で選んだネットワーク
+  (settings.json の `remote_network`) > Tailscale > 127.0.0.1 の順 (`Dock.remote_host`)。ネットワークは `GetAdaptersAddresses` で
+  表示名 (Wi-Fi など) ごとに並べ、**アドレスでなく名前で覚える** (ルーターがアドレスを変えても選び直さなくてよい)。
+  選び直すと待ち受けをやり直す (つないでいるスマホは切れて、noVNC が自分でつなぎ直す)。画面は 1 秒ごとに状態・相手を出し直す。
+  URL の合言葉は画面では伏せる (コピーは合言葉入り)
 - ドックで遠隔から押せるのはタブだけ。「+ 起動」「設定」やタブの右クリックはメニューを出し、メニューは別の窓なので遠隔からは見えず、
   開いている間ドックが止まる。押すのを断ったら、離すまで何も送らない (押した状態の移動を送るだけでも、Tk は押されたことにして
   「+ 起動」のメニューが開いた)

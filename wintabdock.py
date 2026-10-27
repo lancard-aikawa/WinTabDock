@@ -429,6 +429,9 @@ class Dock:
         self.ignored: set[int] = set()  # 「ドックから外す」で外した窓。すぐ自動で取り込み直さない
         self.remote_settings = settings.get("remote", {})  # wintabdock.toml の [remote] (host, port)
         self.remote_server: remote.Server | None = None
+        self._remote_starting = False  # 待ち受けの準備中 (noVNC の取得など。別のスレッド)
+        self._remote_how = ""  # 待ち受けるアドレスの決まり方 (画面に出す)
+        self._remote_panel: tk.Toplevel | None = None
         self._remote_geometry: str | None = None  # 遠隔からつないでいる間 (ドックを画面の外に置く間) の、元の大きさ・位置
         self._tk_calls: queue.SimpleQueue = queue.SimpleQueue()  # 別のスレッドから Tk で動かしてほしいこと
         self.dock_hwnd = 0
@@ -782,7 +785,7 @@ class Dock:
             s = self.remote_server
             m.add_command(label=f"    {s.host}:{s.port} で待っています", state=tk.DISABLED)  # 状態の表示 (押せない)
             m.add_command(label="    つなぐ URL をコピー", command=self.copy_remote_url)
-            m.add_command(label="    合言葉を作り直す (前の URL は使えなくなる)", command=self.renew_remote_token)
+        m.add_command(label="    スマホから使う: アドレスと状態...", command=self.show_remote_panel)
         m.add_separator()
         m.add_command(label=f"WinTabDock {__version__}", state=tk.DISABLED)  # 版の表示 (押せない)
         return m
@@ -866,18 +869,34 @@ class Dock:
         except OSError:
             pass
 
+    def remote_host(self) -> tuple[str, str]:
+        """待ち受けるアドレスと、その決まり方。wintabdock.toml の host > 画面で選んだネットワーク > Tailscale > 127.0.0.1。
+        選んだものはアドレスでなくネットワークの名前 (Wi-Fi など) で覚える。ルーターがアドレスを変えても、その時のアドレスで待つ"""
+        if self.remote_settings.get("host"):
+            return self.remote_settings["host"], "wintabdock.toml の [remote] host"
+        chosen = self.prefs.get("remote_network")
+        if chosen == "loopback":
+            return "127.0.0.1", "この PC だけ"
+        if chosen:
+            for name, ip in remote.local_addresses():
+                if name == chosen:
+                    return ip, chosen
+            return "127.0.0.1", f"「{chosen}」がつながっていないので、この PC だけ"
+        ts = remote.tailscale_ip()
+        return (ts, "Tailscale") if ts else ("127.0.0.1", "この PC だけ (まだ選んでいない)")
+
     def start_remote(self) -> None:
         """待ち受けを始める。noVNC の取得 (初回はダウンロード) は別のスレッドで行い、Tk を止めない。"""
-        if self.remote_server:
+        if self.remote_server or self._remote_starting:
             return
-        cfg = self.remote_settings
-        host = cfg.get("host") or remote.tailscale_ip() or "127.0.0.1"
-        port = int(cfg.get("port", remote.DEFAULT_PORT))
+        host, self._remote_how = self.remote_host()
+        port = int(self.remote_settings.get("port", remote.DEFAULT_PORT))
         token = self.prefs.get("remote_token") or remote.new_token()
         self.prefs.update(remote=True, remote_token=token)
         self.save_prefs()
         self.root.update_idletasks()
         self.dock_hwnd = self.hwnd
+        self._remote_starting = True
 
         def prepare() -> None:
             try:
@@ -888,15 +907,34 @@ class Dock:
                 self.call_in_tk(lambda: self.remote_failed(f"{host}:{port} で待ち受けられませんでした。\n{e}"), wait=False)
                 return
             self.remote_log(f"待ち受けを始めた {host}:{port}")
-            self.call_in_tk(lambda: setattr(self, "remote_server", server), wait=False)
+            self.call_in_tk(lambda: self._remote_started(server), wait=False)
 
         threading.Thread(target=prepare, daemon=True).start()
 
+    def _remote_started(self, server: remote.Server) -> None:
+        self._remote_starting = False
+        if not self.prefs.get("remote") or self._closing:  # 準備している間に止められた
+            server.stop()
+            return
+        self.remote_server = server
+
     def remote_failed(self, msg: str) -> None:
         from tkinter import messagebox
+        self._remote_starting = False
         self.prefs["remote"] = False
         self.save_prefs()
-        messagebox.showerror("WinTabDock", msg, parent=self.root)
+        panel = self._remote_panel
+        messagebox.showerror("WinTabDock", msg, parent=panel if panel and panel.winfo_exists() else self.root)
+
+    def restart_remote(self) -> None:
+        """アドレスや合言葉を変えたときに、待ち受けをやり直す (つないでいるスマホは切れ、自動でつなぎ直してくる)。"""
+        if self.remote_server:
+            self.remote_server.stop()
+            self.remote_server = None
+        if self._remote_geometry:
+            self.remote_connected(False)
+        if self.prefs.get("remote"):
+            self.start_remote()
 
     def stop_remote(self) -> None:
         self.prefs["remote"] = False
@@ -916,9 +954,131 @@ class Dock:
         self.prefs["remote_token"] = remote.new_token()
         self.save_prefs()
         if self.remote_server:
-            self.remote_server.stop()
-            self.remote_server = None
-            self.start_remote()
+            self.restart_remote()
+
+    def set_remote_network(self, name: str) -> None:
+        """待ち受けるネットワークを選ぶ (name はネットワークの名前か "loopback")。待ち受けていればやり直す。"""
+        self.prefs["remote_network"] = name
+        self.save_prefs()
+        if self.remote_server:
+            self.restart_remote()
+
+    def show_remote_panel(self) -> None:
+        """スマホから使うための画面。待ち受けるアドレスを選び、待ち受けの状態・つないでいる相手・URL を見る。"""
+        if self._remote_panel and self._remote_panel.winfo_exists():
+            self._remote_panel.deiconify()
+            self._remote_panel.lift()
+            return
+        win = tk.Toplevel(self.root)
+        win.title("スマホから使う")
+        win.transient(self.root)
+        win.resizable(False, False)
+        self._remote_panel = win
+        hand = {"cursor": "hand2"}
+        primary = {"bg": TAB_ACTIVE, "fg": "#ffffff", "activebackground": "#5b21b6", "activeforeground": "#ffffff",
+                   "relief": tk.RAISED, "bd": 1, "padx": 12, **hand}  # 主役は塗る
+
+        # ボタンの行を先に下へ置く (本体を先に置くと、ボタンが画面の外に押し出される)
+        bar = tk.Frame(win)
+        bar.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=10)
+        tk.Button(bar, text="閉じる", width=10, command=win.destroy, **hand).pack(side=tk.RIGHT)
+
+        body = tk.Frame(win)
+        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=12, pady=(10, 0))
+        head = tk.Frame(body)
+        head.pack(fill=tk.X)
+        status = tk.Label(head, anchor=tk.W, justify=tk.LEFT, font=("", 10, "bold"))
+        status.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        toggle = tk.Button(head, width=10, **primary)
+        toggle.pack(side=tk.RIGHT, padx=(10, 0))
+        peers = tk.Label(body, anchor=tk.W, justify=tk.LEFT, fg="#555555")
+        peers.pack(fill=tk.X, pady=(2, 10))
+
+        tk.Label(body, text="待ち受けるアドレス (スマホがつなぐ先)", anchor=tk.W, font=("", 9, "bold")).pack(fill=tk.X)
+        choices = tk.Frame(body)
+        choices.pack(fill=tk.X, padx=(8, 0))
+        hint = tk.Label(body, anchor=tk.W, justify=tk.LEFT, fg="#555555", wraplength=440)
+        hint.pack(fill=tk.X, pady=(4, 10))
+
+        tk.Label(body, text="つなぐ URL (合言葉が入っています。人に渡さないでください)", anchor=tk.W,
+                 font=("", 9, "bold")).pack(fill=tk.X)
+        url_row = tk.Frame(body)
+        url_row.pack(fill=tk.X, pady=(2, 0))
+        url_var = tk.StringVar()
+        tk.Entry(url_row, textvariable=url_var, state="readonly", width=48).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        copy = tk.Button(url_row, text="コピー", width=8, command=self.copy_remote_url, **hand)
+        copy.pack(side=tk.LEFT, padx=(6, 0))
+        renew = tk.Button(body, text="合言葉を作り直す (前の URL は使えなくなる)", command=self.renew_remote_token, **hand)
+        renew.pack(anchor=tk.W, pady=(6, 0))
+        port = int(self.remote_settings.get("port", remote.DEFAULT_PORT))
+        tk.Label(body, text=f"ポート {port} (変えるときは wintabdock.toml の [remote] port)", anchor=tk.W,
+                 fg="#555555").pack(fill=tk.X, pady=(6, 0))
+
+        net_var = tk.StringVar()
+        shown: list = []  # 前に並べたアドレス (変わったときだけ並べ直す)
+
+        def fill_choices(fixed: bool) -> None:
+            nets = [(n, ip) for n, ip in remote.local_addresses()]
+            key = (fixed, nets)
+            if shown and shown[0] == key:
+                return
+            shown[:] = [key]
+            for w in choices.winfo_children():
+                w.destroy()
+            state = tk.DISABLED if fixed else tk.NORMAL
+            for name, ip in nets:
+                label = f"{name}  {ip}" + ("  (Tailscale。外からも暗号化してつなげる)" if remote.is_tailscale(ip) else "")
+                tk.Radiobutton(choices, text=label, value=name, variable=net_var, state=state, anchor=tk.W,
+                               command=lambda n=name: self.set_remote_network(n), **hand).pack(fill=tk.X)
+            tk.Radiobutton(choices, text="この PC だけ  127.0.0.1  (スマホからはつながらない)", value="loopback",
+                           variable=net_var, state=state, anchor=tk.W,
+                           command=lambda: self.set_remote_network("loopback"), **hand).pack(fill=tk.X)
+
+        def refresh() -> None:
+            if not win.winfo_exists():
+                return
+            host, how = (self.remote_server.host, self._remote_how) if self.remote_server else self.remote_host()
+            fixed = bool(self.remote_settings.get("host"))
+            fill_choices(fixed)
+            # 印は、いま待ち受けているアドレスの行に付ける (toml で決めているときも。空だと Tk は全部を「どれとも言えない」の印にする)
+            net_var.set("loopback" if host == "127.0.0.1" else
+                        next((n for n, ip in remote.local_addresses() if ip == host), self.prefs.get("remote_network", "-")))
+            if self.remote_server:
+                status.config(text=f"待ち受け中  {host}:{self.remote_server.port}", fg="#15803d")
+                toggle.config(text="止める", command=self.stop_remote)
+                who = self.remote_server.peers()
+                peers.config(text="つないでいる: " + "、".join(who) if who else "つないでいるスマホはありません")
+            elif self._remote_starting:
+                status.config(text="始めています... (初回は noVNC をダウンロードします)", fg="#555555")
+                toggle.config(text="止める", command=self.stop_remote)
+                peers.config(text="")
+            else:
+                status.config(text="止まっています", fg="#b91c1c")
+                toggle.config(text="始める", command=self.start_remote)
+                peers.config(text="")
+            notes = [f"いまのアドレス: {host} ({how})"]
+            if fixed:
+                notes.append("wintabdock.toml で決めているので、ここでは選べません。選ぶときは toml の host を消してください。")
+            if host == "127.0.0.1":
+                notes.append("この PC の中からしかつながりません。スマホから使うときは Wi-Fi か Tailscale を選んでください。")
+            elif remote.is_tailscale(host):
+                notes.append("Tailscale の中だけからつながります。通信は暗号化されます。")
+            else:
+                notes.append("同じネットワーク (家の Wi-Fi など) からつながります。通信は暗号化されないので、"
+                             "同じ Wi-Fi の人には合言葉ごと見えることがあります。初めて待ち受けるとき、Windows の"
+                             "ファイアウォールの確認が出たら「プライベート ネットワーク」で許可してください。")
+            hint.config(text="\n".join(notes))
+            on = self.remote_server is not None
+            url_var.set(self.remote_server.url.replace(self.remote_server.token, "********") if on else "(待ち受けていません)")
+            copy.config(state=tk.NORMAL if on else tk.DISABLED)
+            renew.config(state=tk.NORMAL if on else tk.DISABLED)
+            win.after(1000, refresh)
+
+        refresh()
+        win.update_idletasks()
+        x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - win.winfo_width()) // 2)
+        y = self.root.winfo_rooty() + 40
+        win.geometry(f"+{x}+{y}")
 
     def remote_connected(self, on: bool) -> None:
         """つないでいる間はドックを画面の外 (右の外) に置く。手元のほかの窓が重なっていると、Tk のボタンは

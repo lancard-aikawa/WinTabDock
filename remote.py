@@ -688,6 +688,67 @@ def novnc_dir(base: Path) -> Path:
     return root
 
 
+class _SocketAddress(ctypes.Structure):
+    _fields_ = [("lpSockaddr", ctypes.c_void_p), ("iSockaddrLength", ctypes.c_int)]
+
+
+class _UnicastAddress(ctypes.Structure):
+    pass
+
+
+_UnicastAddress._fields_ = [("Length", ctypes.c_ulong), ("Flags", wintypes.DWORD),
+                            ("Next", ctypes.POINTER(_UnicastAddress)), ("Address", _SocketAddress)]
+
+
+class _AdapterAddresses(ctypes.Structure):
+    pass
+
+
+# IP_ADAPTER_ADDRESSES の頭の部分だけ (OperStatus まで)。次へは Next でたどるので、後ろを書かなくてよい
+_AdapterAddresses._fields_ = [
+    ("Length", ctypes.c_ulong), ("IfIndex", wintypes.DWORD), ("Next", ctypes.POINTER(_AdapterAddresses)),
+    ("AdapterName", ctypes.c_char_p), ("FirstUnicastAddress", ctypes.POINTER(_UnicastAddress)),
+    ("FirstAnycastAddress", ctypes.c_void_p), ("FirstMulticastAddress", ctypes.c_void_p),
+    ("FirstDnsServerAddress", ctypes.c_void_p), ("DnsSuffix", ctypes.c_wchar_p), ("Description", ctypes.c_wchar_p),
+    ("FriendlyName", ctypes.c_wchar_p), ("PhysicalAddress", ctypes.c_ubyte * 8), ("PhysicalAddressLength", ctypes.c_ulong),
+    ("Flags", ctypes.c_ulong), ("Mtu", ctypes.c_ulong), ("IfType", wintypes.DWORD), ("OperStatus", ctypes.c_int),
+]
+
+
+def local_addresses() -> list[tuple[str, str]]:
+    """この PC のネットワークと IPv4 のアドレス [(名前, アドレス)]。名前は Windows の表示名 (Wi-Fi・Tailscale など)。
+    つながっているものだけ。この PC の中だけの 127.0.0.1 は含めない。"""
+    iphlpapi = ctypes.WinDLL("iphlpapi")
+    size = ctypes.c_ulong(16384)
+    for _ in range(3):
+        buf = ctypes.create_string_buffer(size.value)
+        # AF_INET、エニーキャスト・マルチキャスト・DNS のアドレスは要らない
+        r = iphlpapi.GetAdaptersAddresses(socket.AF_INET, 0x2 | 0x4 | 0x8, None, buf, ctypes.byref(size))
+        if r != 111:  # ERROR_BUFFER_OVERFLOW なら、言われた大きさで取り直す
+            break
+    if r != 0:
+        return []
+    out = []
+    p = ctypes.cast(buf, ctypes.POINTER(_AdapterAddresses))
+    while p:
+        a = p.contents
+        if a.OperStatus == 1 and a.IfType != 24:  # つながっている、ループバックでない
+            u = a.FirstUnicastAddress
+            while u:
+                sa = u.contents.Address
+                if sa.lpSockaddr and sa.iSockaddrLength >= 8:
+                    raw = ctypes.string_at(sa.lpSockaddr, 8)
+                    out.append((a.FriendlyName or "", socket.inet_ntoa(raw[4:8])))
+                u = u.contents.Next
+        p = a.Next
+    return out
+
+
+def is_tailscale(ip: str) -> bool:
+    a, b = (int(p) for p in ip.split(".")[:2])
+    return a == 100 and 64 <= b <= 127
+
+
 def tailscale_ip() -> str | None:
     """この PC の Tailscale のアドレス (100.64.0.0/10)。無ければ None。"""
     try:
@@ -718,6 +779,11 @@ class Server:
     def url(self) -> str:
         path = urllib.parse.quote(f"websockify?token={self.token}", safe="")
         return f"http://{self.host}:{self.port}/vnc.html?autoconnect=true&resize=remote&reconnect=true&path={path}"
+
+    def peers(self) -> list[str]:
+        """いまつないでいる相手のアドレス。"""
+        with self.lock:
+            return [s.name for s in self.sessions]
 
     def start(self) -> None:
         self.sock = socket.create_server((self.host, self.port))

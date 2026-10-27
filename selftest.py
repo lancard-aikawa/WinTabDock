@@ -331,7 +331,8 @@ def steps_all(dock: td.Dock, tools: list[dict]):
     sm_all = dock.build_settings_menu()
     settings_labels = [sm_all.entrycget(i, "label") for i in range(sm_all.index("end") + 1)
                        if sm_all.type(i) != "separator" and sm_all.entrycget(i, "state") != "disabled"]  # 版の表示は除く
-    check(not {"起動時に開く", "閉じるときのツール"} & set(labels) and settings_labels == ["起動時に開く", "閉じるときのツール"],
+    want = ["起動時に開く", "閉じるときのツール", "スマホから使う (ブラウザで開く)", "    スマホから使う: アドレスと状態..."]
+    check(not {"起動時に開く", "閉じるときのツール"} & set(labels) and settings_labels == want,
           f"設定は「+ 起動 / 取り込む」と分かれ、「設定」のメニューにある {settings_labels}")
     check(dock.settings_button.winfo_rootx() > dock.menu_button.winfo_rootx(), "「設定」ボタンは右端 (+ 起動 / 取り込む の右)")
 

@@ -258,6 +258,7 @@ def steps(dock: td.Dock) -> None:
         dock.call_in_tk(dock.save_session)
         saved = json.loads((HOME / "session.json").read_text(encoding="utf-8"))["geometry"]
         check("前回の位置には、元の位置を覚える", saved == original, saved)
+        panel_steps(dock, token)
     except Exception:
         traceback.print_exc()
         check("途中で止まらない", False)
@@ -269,6 +270,75 @@ def steps(dock: td.Dock) -> None:
         ck.close_apps([(app1, h1), (app2, h2)])
         dock.call_in_tk(dock.stop_remote)
         dock.call_in_tk(dock.quit, wait=False)
+
+
+def panel_steps(dock: td.Dock, token: str) -> None:
+    """「スマホから使う」の画面: 状態・アドレス・URL を見せ、選んだネットワークで待ち受け直す。"""
+    dock.call_in_tk(dock.show_remote_panel)
+    time.sleep(1.2)
+    texts = tk_get(dock, lambda: widget_texts(dock._remote_panel))
+    radios = tk_get(dock, lambda: [(w.cget("value"), str(w.cget("state"))) for w in radio_buttons(dock._remote_panel)])
+    url_shown = tk_get(dock, lambda: [w.get() for w in all_widgets(dock._remote_panel) if isinstance(w, td.tk.Entry)])
+    shot(dock, "remote-3-panel.png")
+    check("画面に待ち受けの状態とアドレスが出る", any("待ち受け中  127.0.0.1:15900" in t for t in texts)
+          and any("wintabdock.toml" in t for t in texts), " / ".join(t for t in texts if "待ち受け" in t))
+    check("toml で決めているときは、アドレスを選べない", radios and all(s == "disabled" for _, s in radios), str(radios))
+    check("URL の合言葉は画面に出さない (伏せ字)", url_shown and token not in url_shown[0] and "********" in url_shown[0],
+          url_shown[0] if url_shown else "-")
+
+    # Wi-Fi を選ぶ (ファイアウォールで許可した、家のネットワーク)。仮想のネットワーク (VirtualBox・WSL) で待ち受けると、
+    # 許可の決まりが無いので Windows の確認が人の画面に出る
+    nets = sorted(remote.local_addresses(), key=lambda a: a[0] != "Wi-Fi")[:1]
+    if not nets:
+        check("ほかのネットワークを選ぶ (この PC にネットワークが無いので飛ばす)", True)
+        return
+    dock.remote_settings.pop("host")  # toml に書いていない人として
+    time.sleep(1.5)  # 画面が 1 秒ごとに並べ直す
+    name, ip = nets[0]
+    tk_get(dock, lambda: next(w for w in radio_buttons(dock._remote_panel) if w.cget("value") == name).invoke())
+    host = wait_host(dock, ip)
+    check(f"「{name}」を選ぶと、そのアドレスで待ち受け直す", host == ip and dock.prefs.get("remote_network") == name,
+          f"{host} / {ip}")
+    time.sleep(1.2)
+    texts = tk_get(dock, lambda: widget_texts(dock._remote_panel))
+    shot(dock, "remote-4-panel-lan.png")
+    check("画面のアドレスも変わる", any(f"待ち受け中  {ip}:" in t for t in texts),
+          " / ".join(t for t in texts if "待ち受け" in t))
+    tk_get(dock, lambda: next(w for w in radio_buttons(dock._remote_panel) if w.cget("value") == "loopback").invoke())
+    host = wait_host(dock, "127.0.0.1")
+    check("「この PC だけ」に戻せる", host == "127.0.0.1", str(host))
+    dock.call_in_tk(dock._remote_panel.destroy)
+
+
+def wait_host(dock: td.Dock, want: str) -> str | None:
+    for _ in range(50):
+        if dock.remote_server and dock.remote_server.host == want:
+            break
+        time.sleep(0.1)
+    return dock.remote_server.host if dock.remote_server else None
+
+
+def all_widgets(w) -> list:
+    out = [w]
+    for c in w.winfo_children():
+        out += all_widgets(c)
+    return out
+
+
+def radio_buttons(w) -> list:
+    return [x for x in all_widgets(w) if isinstance(x, td.tk.Radiobutton)]
+
+
+def widget_texts(w) -> list[str]:
+    return [str(x.cget("text")) for x in all_widgets(w) if isinstance(x, (td.tk.Label, td.tk.Button, td.tk.Radiobutton))]
+
+
+def shot(dock: td.Dock, name: str) -> None:
+    """画面の内側を撮る。窓そのものを撮る (PrintWindow) ので、ほかの窓の後ろにあっても写る。"""
+    hwnd = int(tk_get(dock, dock._remote_panel.wm_frame), 16)
+    w, h = remote.client_size(hwnd)
+    data = remote.compose([(hwnd, 0, 0, w, h)], w, h, 1.0)
+    Image.frombuffer("RGB", (w, h), data, "raw", "BGRX").save(OUT / name)
 
 
 def tk_get(dock: td.Dock, fn):
