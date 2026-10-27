@@ -324,9 +324,13 @@ def panel_steps(dock: td.Dock, token: str) -> None:
     except OSError:
         pass
     dock.remote_settings.pop("host")  # toml に書いていない人として
-    time.sleep(1.5)  # 画面が 1 秒ごとに並べ直す
     name, ip = nets[0]
-    radios = tk_get(dock, lambda: [(w.cget("value"), str(w.cget("state"))) for w in radio_buttons(dock._remote_panel)])
+    deadline = time.monotonic() + 3  # 画面は 1 秒ごとに並べ直す。決め打ちの 1.5 秒待ちでは 1 度間に合わなかった
+    while True:
+        radios = tk_get(dock, lambda: [(w.cget("value"), str(w.cget("state"))) for w in radio_buttons(dock._remote_panel)])
+        if (radios and all(s == "normal" for _, s in radios)) or time.monotonic() > deadline:
+            break
+        time.sleep(0.2)
     check("toml の host を消すと、アドレスを選べるようになる", radios and all(s == "normal" for _, s in radios), str(radios))
     tk_get(dock, lambda: next(w for w in radio_buttons(dock._remote_panel) if w.cget("value") == name).invoke())
     host = wait_host(dock, ip)
