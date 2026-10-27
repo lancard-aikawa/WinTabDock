@@ -48,6 +48,14 @@ def tk_get(dock: td.Dock, fn):
     return box[0] if box else None
 
 
+def dock_button_pos(dock: td.Dock, button) -> tuple[int, int]:
+    """ドックの帯のボタンの真ん中の、スマホの画面 (CSS の px) での位置。縮めて見せているときはその倍率を掛ける。"""
+    x, y, w, h = td.rect_of(tk_get(dock, button.winfo_id))
+    ox, oy = remote.client_origin(dock.dock_hwnd)
+    s = dock.remote_server.view.scale
+    return round((x - ox + w // 2) * s), round((y - oy + h // 2) * s)
+
+
 def steps(dock: td.Dock) -> None:
     app1, h1 = ck.start_app(f"an{os.getpid()}a")
     app2, h2 = ck.start_app(f"an{os.getpid()}b", 600)
@@ -102,6 +110,27 @@ def steps(dock: td.Dock) -> None:
         va.screenshot("dock-2-typed")
         tab.js("document.getElementById('noVNC_keyboardinput').blur()")
         time.sleep(1.0)
+
+        # 表示倍率: 帯の「− 縮小」を 2 回 (100 → 90 → 75%)、指でタップする
+        for _ in range(2):
+            tab.tap(*dock_button_pos(dock, dock.zoom_out_button))
+            time.sleep(1.5)
+        size = remote.client_size(dock.dock_hwnd)
+        want = (round(vw / 0.75), round(vh / 0.75))
+        time.sleep(1.5)  # 画面の外で広げた所が描かれるのを待ってから撮る
+        va.screenshot("dock-2b-zoom75")
+        ck.check("「− 縮小」のタップで 75% になり、ドックが 1/0.75 の大きさになる", dock.remote_zoom == 0.75 and size == want,
+                 f"倍率 {dock.remote_zoom} ドック {size} / {want}")
+        _, tx, ty, _, _ = td.RemoteSource(dock).layers()[1]
+        s = dock.remote_server.view.scale
+        tab.tap(round((tx + 140) * s), round((ty + 110) * s))
+        title = ck.wait_title(h1, "count=3")
+        ck.check("縮小した画面の上でも、タップでツールのボタンを押せる", "count=3" in title, title)
+        for _ in range(2):
+            tab.tap(*dock_button_pos(dock, dock.zoom_in_button))
+            time.sleep(1.5)
+        size = remote.client_size(dock.dock_hwnd)
+        ck.check("「+ 拡大」で 100% に戻る", dock.remote_zoom == 1.0 and size == (vw, vh), f"倍率 {dock.remote_zoom} ドック {size}")
 
         # タブ (app2) を押す。ドックの帯の中の位置 (縮めていない画面)
         bx, by, bw, bh = td.rect_of(dock.tabs[1].button_hwnd)

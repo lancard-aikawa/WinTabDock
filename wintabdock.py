@@ -388,9 +388,9 @@ class RemoteSource:
     def click_allowed(self, top: int, child: int, mask: int) -> bool:
         if top != self.dock.dock_hwnd:
             return True
-        # ドックで押せるのはタブ (左ボタン) だけ。「+ 起動」「設定」やタブの右クリックはメニューを出し、
+        # ドックで押せるのはタブと表示倍率のボタン (左ボタン) だけ。「+ 起動」「設定」やタブの右クリックはメニューを出し、
         # メニューは別の窓なので遠隔からは見えず、開いている間ドックが止まる
-        return mask & 7 == 1 and child in {t.button_hwnd for t in self.dock.tabs}
+        return mask & 7 == 1 and child in {t.button_hwnd for t in self.dock.tabs} | self.dock.zoom_hwnds
 
     def connected(self, on: bool) -> None:
         self.dock.call_in_tk(lambda: self.dock.remote_connected(on), wait=False)
@@ -467,14 +467,25 @@ class Dock:
         # 右端から: 設定 / + 起動 / 取り込む (side=RIGHT は先に置いたものほど右に並ぶ)。
         # 「設定」は枠線付きにして、取り込んだツールの中の「設定」(RepoTether のタブなど) と見分けられるようにする
         # 枠は 1px 大きい紫の Frame で包んで描く (Windows の tk.Button は highlightthickness の枠を描かなかった)
-        frame = tk.Frame(self.bar, bg=BAR_EDGE, padx=1, pady=1)
-        frame.pack(side=tk.RIGHT, padx=(0, 8), pady=4)
-        self.settings_button = tk.Button(frame, text="設定 ▾", command=self.show_settings, bg=BAR_BG, fg=TAB_FG,
-                                         relief=tk.FLAT, activebackground=TAB_ACTIVE, padx=10, bd=0)
+        self.settings_frame = tk.Frame(self.bar, bg=BAR_EDGE, padx=1, pady=1)
+        self.settings_button = tk.Button(self.settings_frame, text="設定 ▾", command=self.show_settings, bg=BAR_BG,
+                                         fg=TAB_FG, relief=tk.FLAT, activebackground=TAB_ACTIVE, padx=10, bd=0)
         self.settings_button.pack()
         self.menu_button = tk.Button(self.bar, text="+ 起動 / 取り込む", command=self.show_menu, bg=TAB_BG, fg=TAB_FG,
                                      relief=tk.FLAT, activebackground=TAB_ACTIVE, padx=10)
-        self.menu_button.pack(side=tk.RIGHT, padx=6, pady=4)
+        self.pack_bar_buttons()
+        # スマホとつないでいる間だけ「+ 起動」「設定」の代わりに出す、表示倍率のボタン (remote_connected で入れ替える)
+        self.zoom_frame = tk.Frame(self.bar, bg=BAR_BG)
+        zoom_button = {"bg": TAB_BG, "fg": TAB_FG, "relief": tk.FLAT, "activebackground": TAB_ACTIVE,
+                       "disabledforeground": "#55557a", "padx": 8, "cursor": "hand2"}
+        self.zoom_out_button = tk.Button(self.zoom_frame, text="− 縮小", command=lambda: self.change_zoom(-1), **zoom_button)
+        self.zoom_out_button.pack(side=tk.LEFT, pady=4)
+        self.zoom_label = tk.Label(self.zoom_frame, bg=BAR_BG, fg=TAB_FG_DIM, width=5)  # 今の倍率 (押せない表示)
+        self.zoom_label.pack(side=tk.LEFT)
+        self.zoom_in_button = tk.Button(self.zoom_frame, text="+ 拡大", command=lambda: self.change_zoom(1), **zoom_button)
+        self.zoom_in_button.pack(side=tk.LEFT, padx=(0, 8), pady=4)
+        self.zoom_hwnds = {self.zoom_out_button.winfo_id(), self.zoom_in_button.winfo_id()}
+        self.show_zoom()
         # タブの帯と、取り込んだツールの窓の境目。ツールの上端にも帯と似た見た目 (タブや「設定」) があると、
         # どこまでがドックか分かりにくかった
         tk.Frame(self.root, bg=BAR_EDGE, height=2).pack(side=tk.TOP, fill=tk.X)
@@ -916,7 +927,8 @@ class Dock:
         def prepare() -> None:
             try:
                 web_root = remote.novnc_dir(STATE_DIR)
-                server = remote.Server(remote.View(RemoteSource(self)), host, port, token, web_root, self.remote_log)
+                view = remote.View(RemoteSource(self), self.remote_zoom)
+                server = remote.Server(view, host, port, token, web_root, self.remote_log)
                 server.start()
             except OSError as e:
                 # 文字にしてから渡す (e は except を抜けると消えるので、あとで動く lambda からは読めない)
@@ -1041,6 +1053,8 @@ class Dock:
         port = int(self.remote_settings.get("port", remote.DEFAULT_PORT))
         tk.Label(body, text=f"ポート {port} (変えるときは wintabdock.toml の [remote] port)", anchor=tk.W,
                  fg="#555555").pack(fill=tk.X, pady=(6, 0))
+        zoom_info = tk.Label(body, anchor=tk.W, fg="#555555")
+        zoom_info.pack(fill=tk.X)
 
         net_var = tk.StringVar()
         shown: list = []  # 前に並べたアドレス (変わったときだけ並べ直す)
@@ -1096,6 +1110,8 @@ class Dock:
                              "同じ Wi-Fi の人には合言葉ごと見えることがあります。初めて待ち受けるとき、Windows の"
                              "ファイアウォールの確認が出たら「プライベート ネットワーク」で許可してください。")
             hint.config(text="\n".join(notes))
+            zoom_info.config(text=f"スマホでの表示倍率 {round(self.remote_zoom * 100)}% "
+                                  "(スマホで、タブの帯の「− 縮小」「+ 拡大」で変える)")
             on = self.remote_server is not None
             url_var.set(self.remote_server.url.replace(self.remote_server.token, "********") if on else "(待ち受けていません)")
             copy.config(state=tk.NORMAL if on else tk.DISABLED)
@@ -1123,6 +1139,14 @@ class Dock:
             if self.root.state() == "iconic":
                 self.root.deiconify()
             self._remote_geometry = self.root.geometry()
+            self._remote_maxsize = self.root.maxsize()
+            # 縮めて見せるときは画面より高いドックが要る。Tk の既定 (画面の大きさ) のままだと、Windows が画面の高さで止める
+            self.root.maxsize(8000, 8000)
+            # 遠隔からは押せない「+ 起動」「設定」を外し、表示倍率のボタンを出す
+            self.menu_button.pack_forget()
+            self.settings_frame.pack_forget()
+            self.show_zoom()
+            self.zoom_frame.pack(side=tk.RIGHT)
             x = user32.GetSystemMetrics(76) + user32.GetSystemMetrics(78) + 100  # 仮想画面の右端の外
             self.root.geometry(f"+{x}+{user32.GetSystemMetrics(77)}")
             threading.Thread(target=self._keep_tk_awake, daemon=True).start()
@@ -1133,10 +1157,45 @@ class Dock:
                 self._remote_notice.destroy()
             self._remote_notice = None
             geometry, self._remote_geometry = self._remote_geometry, None
+            self.zoom_frame.pack_forget()
+            self.pack_bar_buttons()
+            self.root.maxsize(*self._remote_maxsize)
             self.root.geometry(geometry)
             self.root.update_idletasks()
             self.place_active(show=True)
             self.remote_log("切れたので、ドックを元の場所に戻した")
+
+    ZOOMS = (0.5, 0.67, 0.75, 0.9, 1.0, 1.25, 1.5)  # スマホでの表示倍率の段
+
+    @property
+    def remote_zoom(self) -> float:
+        z = self.prefs.get("remote_zoom", 1.0)
+        return z if z in self.ZOOMS else 1.0
+
+    def change_zoom(self, step: int) -> None:
+        """表示倍率を 1 段変える (スマホからタブの帯のボタンで)。覚えておき、次につないだときも使う。"""
+        i = max(0, min(len(self.ZOOMS) - 1, self.ZOOMS.index(self.remote_zoom) + step))
+        self.prefs["remote_zoom"] = self.ZOOMS[i]
+        self.save_prefs()
+        self.show_zoom()
+        view = self.remote_server.view if self.remote_server else None
+        if view:
+            view.zoom = self.ZOOMS[i]
+            if view.requested:
+                # 大きさを合わせ直す。resize は Tk のスレッドに頼んで待つので、Tk のスレッドからは別のスレッドで呼ぶ
+                threading.Thread(target=view.resize, args=view.requested, daemon=True).start()
+        self.remote_log(f"表示倍率を {round(self.ZOOMS[i] * 100)}% にした")
+
+    def show_zoom(self) -> None:
+        z = self.remote_zoom
+        self.zoom_label.config(text=f"{round(z * 100)}%")
+        self.zoom_out_button.config(state=tk.DISABLED if z == self.ZOOMS[0] else tk.NORMAL)
+        self.zoom_in_button.config(state=tk.DISABLED if z == self.ZOOMS[-1] else tk.NORMAL)
+
+    def pack_bar_buttons(self) -> None:
+        """帯の右端に「設定」と「+ 起動 / 取り込む」を置く (side=RIGHT は先に置いたものほど右に並ぶ)。"""
+        self.settings_frame.pack(side=tk.RIGHT, padx=(0, 8), pady=4)
+        self.menu_button.pack(side=tk.RIGHT, padx=6, pady=4)
 
     def show_remote_notice(self) -> None:
         """つないでいる間、PC の画面の右下に出す小さな窓。ドックが画面の外にいることを知らせ、PC の側から取り戻せるようにする。

@@ -227,12 +227,15 @@ class Source(Protocol):
 class View:
     """Source を VNC の画面にする。VNC の画面の画素 = 窓の画素 x scale。
 
-    つないだ側が大きさを決めたら (SetDesktopSize) ドックをその大きさにする。ツールが最小の幅などで収まらなければ、
-    縮めて収め、縮めた分だけドックを縦に伸ばす (PortWho は幅 680、LPortMan は 760 より狭くならない)。"""
+    つないだ側が大きさを決めたら (SetDesktopSize) ドックをその大きさ ÷ 表示倍率 (zoom) にし、zoom 倍で見せる。
+    zoom が 1 未満なら、ドックを大きく作って縮めて見せる (横に多く入る)。1 より大きければ小さく作って広げて見せる (文字が大きい)。
+    ツールが最小の幅などで収まらなければ、さらに縮めて収め、縮めた分だけドックを縦に伸ばす
+    (PortWho は幅 680、LPortMan は 760 より狭くならない)。"""
 
-    def __init__(self, source: Source):
+    def __init__(self, source: Source, zoom: float = 1.0):
         self.source = source
         self.requested: tuple[int, int] | None = None
+        self.zoom = zoom
         self.scale = 1.0
         self.lock = threading.Lock()
         self.input = WindowInput(self)
@@ -241,7 +244,7 @@ class View:
         w, h = self.source.extent()
         if not self.requested or w <= 0 or h <= 0:
             return 1.0
-        return min(1.0, self.requested[0] / w, self.requested[1] / h)
+        return min(self.zoom, self.requested[0] / w, self.requested[1] / h)
 
     def fb_size(self) -> tuple[int, int]:
         if self.requested:
@@ -252,12 +255,14 @@ class View:
     def resize(self, w: int, h: int) -> None:
         with self.lock:
             self.requested = (w, h)
-            self.source.set_client_size(w, h)
+            lw, lh = round(w / self.zoom), round(h / self.zoom)
+            self.source.set_client_size(lw, lh)
             s = self._fit()
-            if s < 1:
-                # 縮めるなら、その倍率で縦を使い切る高さにする。幅はツールに揃える (タブの帯もツールの幅まで伸ばす)
+            if s < self.zoom:
+                # ツールが収まらず、さらに縮めるなら、その倍率で縦を使い切る高さにする。幅はツールに揃える
+                # (タブの帯もツールの幅まで伸ばす)
                 cw, _ = self.source.extent()
-                self.source.set_client_size(max(w, cw), round(h / s))
+                self.source.set_client_size(max(lw, cw), round(h / s))
             self.scale = self._fit()
 
     def frame(self) -> bytes:

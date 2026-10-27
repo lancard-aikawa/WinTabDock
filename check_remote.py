@@ -222,16 +222,58 @@ def steps(dock: td.Dock) -> None:
         title = ck.wait_title(h1, "text=okあ ")
         check("文字と日本語を打てる", "text=okあ " in title, title)
 
-        menu_x, menu_y = button_pos(dock, tk_get(dock, dock.menu_button.winfo_id))
+        mapped = tk_get(dock, lambda: (dock.menu_button.winfo_ismapped(), dock.settings_button.winfo_ismapped(),
+                                       dock.zoom_out_button.winfo_ismapped(), dock.zoom_in_button.winfo_ismapped()))
+        check("つないでいる間は、帯の「+ 起動」「設定」の代わりに表示倍率のボタンが出る", mapped == (0, 0, 1, 1), str(mapped))
+        # 押せない所 (倍率の表示) は、押しても何も起きず、ドックも止まらない
+        label_x, label_y = button_pos(dock, tk_get(dock, dock.zoom_label.winfo_id))
         menus_before = len(our_menus())
-        c.tap(menu_x, menu_y)
+        c.tap(label_x, label_y)
         time.sleep(0.8)
         t0 = time.monotonic()
         dock.call_in_tk(lambda: None)
         stuck = time.monotonic() - t0
         menus = len(our_menus())
-        check("「+ 起動」は遠隔から押されない (メニューが出ず、ドックが止まらない)", menus == menus_before and stuck < 1,
-              f"メニュー {menus_before} → {menus} 個、応答 {stuck:.2f} 秒")
+        check("帯の押せない所は、遠隔から押しても何も起きない (メニューが出ず、ドックが止まらない)",
+              menus == menus_before and stuck < 1 and dock.remote_zoom == 1.0,
+              f"メニュー {menus_before} → {menus} 個、応答 {stuck:.2f} 秒、倍率 {dock.remote_zoom}")
+
+        for _ in range(3):  # 100 → 90 → 75 → 67%
+            c.tap(*button_pos(dock, tk_get(dock, dock.zoom_out_button.winfo_id)))
+            time.sleep(1.0)
+        size = remote.client_size(dock.dock_hwnd)
+        view = dock.remote_server.view
+        # 1152 は画面の高さ (1080) より高い。Tk の maxsize を広げないと、Windows が画面の高さで止める
+        check("「− 縮小」3 回で 67% になり、ドックは 411x772 の 1/0.67 の大きさになる (画面より高くても)",
+              dock.remote_zoom == 0.67 and size == (613, 1152) and abs(view.scale - 0.67) < 0.01,
+              f"倍率 {dock.remote_zoom} ドック {size} scale {view.scale:.3f}")
+        # 画面の外で広げた所は、描かれるまで 0.5〜1 秒ほど黒い。帯も、前の倍率のボタンの絵がしばらく残る (実験で確かめた)。
+        # 4 秒以内に正しく写れば良い
+        deadline = time.monotonic() + 4
+        while True:
+            img = c.full_frame()
+            _, tx, ty, tw, th = RemoteSource_layers(dock)[1]
+            s = view.scale
+            fit = img.crop((round(tx * s), round(ty * s), round((tx + tw) * s), round((ty + th) * s)))
+            stale = old_zoom_buttons(img)
+            if (not ck.corners_ok(fit) and is_light(fit) and not stale) or time.monotonic() > deadline:
+                break
+            time.sleep(0.2)
+        img.save(OUT / "remote-1b-zoom67.png")
+        check("縮小したあと、帯に前の倍率のボタンの絵が残らない", not stale, f"明るい画素 {stale}")
+        check("縮小した画面にツールが収まる (四隅)", img.size == (411, 772) and not ck.corners_ok(fit),
+              f"画像 {img.size} ツール {tw}x{th} {ck.corners_ok(fit)}")
+        check("縮小した画面で、ツールの地が描かれている (中ほどが白い。画面の外で広げた所は描かれるのが遅れる)",
+              is_light(fit), str(fit.getpixel((fit.width // 2, fit.height // 2))))
+        c.tap(round((tx + 140) * s), round((ty + 110) * s))
+        title = ck.wait_title(h1, "count=3")
+        check("縮小した画面の上でも押せる", "count=3" in title, title)
+        for _ in range(3):
+            c.tap(*button_pos(dock, tk_get(dock, dock.zoom_in_button.winfo_id)))
+            time.sleep(1.0)
+        size = remote.client_size(dock.dock_hwnd)
+        check("「+ 拡大」で 100% に戻り、ドックも 411x772 に戻る", dock.remote_zoom == 1.0 and size == (411, 772),
+              f"倍率 {dock.remote_zoom} ドック {size}")
 
         tab2_x, tab2_y = button_pos(dock, dock.tabs[1].button_hwnd)
         c.tap(tab2_x, tab2_y)
@@ -246,14 +288,17 @@ def steps(dock: td.Dock) -> None:
             _, tx, ty, tw, th = layers[1]
             s = 411 / (tx + tw)
             fit = img.crop((round(tx * s), round(ty * s), round((tx + tw) * s), round((ty + th) * s)))
-            if not ck.corners_ok(fit) or time.monotonic() > deadline:
+            if (not ck.corners_ok(fit) and is_light(fit)) or time.monotonic() > deadline:
                 break
+            time.sleep(0.2)
         img.save(OUT / "remote-2-minwidth.png")
         # 切り替えた直後 (0.2 秒以内) のタップは、30 回に 1 回ほど抜けた (窓を出して大きさを変えた直後)。少し待ってから押す
         time.sleep(0.8)
         # Tk の最小の幅は枠を含めた窓の大きさに効くので、枠を外したツールの内側は 600 より少し広い (616 だった)
         check("最小の幅 600 のツールは、縮めて収まる (四隅)", tw >= 600 and img.size == (411, 772) and not ck.corners_ok(fit),
               f"ツール {tw}x{th} 画像 {img.size} {ck.corners_ok(fit)}")
+        check("切り替えて広げたツールの地が描かれている (中ほどが白い。3 秒待つ前は真っ黒のことがあった)", is_light(fit),
+              str(fit.getpixel((fit.width // 2, fit.height // 2))))
         c.tap(round((tx + 140) * s), round((ty + 110) * s))
         title = ck.wait_title(h2, "count=1")
         check("縮めた画面の上でも押せる", "count=1" in title, title)
@@ -386,6 +431,17 @@ def radio_buttons(w) -> list:
 
 def widget_texts(w) -> list[str]:
     return [str(x.cget("text")) for x in all_widgets(w) if isinstance(x, (td.tk.Label, td.tk.Button, td.tk.Radiobutton))]
+
+
+def old_zoom_buttons(img) -> int:
+    """67% の画面で、帯の中ほど (100% のときの倍率のボタンがあった所) の明るい画素の数。
+    描き直しが遅れると、前の絵 (「− 縮小 100% + 拡大」) がここに残る。正しく描けていれば帯の地だけで 0"""
+    return sum(1 for p in img.crop((150, 2, 280, 22)).convert("L").getdata() if p > 90)
+
+
+def is_light(img) -> bool:
+    """画像の中ほどが白っぽいか (試験用の窓の地は白)。"""
+    return min(img.convert("RGB").getpixel((img.width // 2, img.height // 2))) > 200
 
 
 def read_qr(path: Path) -> list[str]:
