@@ -819,8 +819,20 @@ class Dock:
         """別のスレッドから、Tk のスレッドで fn を動かす (Tk は作ったスレッドからしか触れない)。"""
         done = threading.Event()
         self._tk_calls.put((fn, done))
-        self._wake_tk()
-        if wait and not done.wait(timeout):
+
+        def nudge() -> bool:
+            # 呼び出しは 20ms ごとの時計 (after) で動くので、1 回起こしただけでは時計の前にまた眠ることがある。
+            # 動くまで 50ms ごとに起こし続ける (遠隔を切ったあとの quit が届かずドックが閉じなかった、2026-10-27)
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                self._wake_tk()
+                if done.wait(0.05):
+                    return True
+            return False
+
+        if not wait:
+            threading.Thread(target=nudge, daemon=True).start()
+        elif not nudge():
             self.remote_log(f"Tk のスレッドが {timeout} 秒応えない ({getattr(fn, '__name__', fn)})")
 
     def _wake_tk(self) -> None:

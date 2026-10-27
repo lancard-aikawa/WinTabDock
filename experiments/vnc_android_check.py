@@ -74,13 +74,22 @@ def screenshot(name: str) -> None:
     (OUT / f"android-{name}.png").write_bytes(data)
 
 
-def find_tab(timeout: float = 20) -> dict:
+def tab_ids() -> set[str]:
+    """いまスマホの Chrome に開いているタブ。find_tab で、開く前から在ったタブを除くのに使う。"""
+    tabs = json.load(urllib.request.urlopen(f"http://127.0.0.1:{CDP_PORT}/json", timeout=3))
+    return {t["id"] for t in tabs}
+
+
+def find_tab(timeout: float = 20, host: str = "127.0.0.1", old: set[str] = frozenset()) -> dict:
+    """noVNC のタブを探す。old (開く前から在ったタブ) は選ばない。
+    前の試験で残ったタブは裏でつなぎ直し続けていて、JavaScript には応えるがタッチは返ってこない (2026-10-27)"""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
             tabs = json.load(urllib.request.urlopen(f"http://127.0.0.1:{CDP_PORT}/json", timeout=3))
             for t in tabs:
-                if t.get("type") == "page" and f"127.0.0.1:{vp.PORT}/vnc.html" in t.get("url", ""):
+                if (t.get("type") == "page" and t["id"] not in old
+                        and f"{host}:{vp.PORT}/vnc.html" in t.get("url", "")):
                     return t
         except OSError:
             pass
@@ -120,9 +129,10 @@ def main() -> None:
         adb("reverse", f"tcp:{vp.PORT}", f"tcp:{vp.PORT}")
         adb("forward", f"tcp:{CDP_PORT}", "localabstract:chrome_devtools_remote")
         adb("shell", "input", "keyevent", "KEYCODE_WAKEUP")
+        old = tab_ids()
         adb("shell", "am", "start", "-a", "android.intent.action.VIEW", "-p", "com.android.chrome",
             "-d", f"http://127.0.0.1:{vp.PORT}/")
-        tab_info = find_tab()
+        tab_info = find_tab(old=old)
         tab = Tab(tab_info["webSocketDebuggerUrl"])
         time.sleep(3)
 

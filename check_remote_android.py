@@ -4,7 +4,8 @@
 # ///
 """遠隔を、Android の実機の Chrome から確かめる。USB でつなぎ、USB デバッグを許可しておく。
 
-    uv run check_remote_android.py
+    uv run check_remote_android.py                    # スマホの 127.0.0.1 を USB で PC に届ける (adb reverse)
+    uv run check_remote_android.py --lan 192.168.x.x  # スマホは Wi-Fi で PC のこのアドレスにつなぐ (USB は試験の操作だけ)
 
 ドックを開いて試験用の窓を 2 つ取り込み (1 つは最小の幅 600)、遠隔を 127.0.0.1 で始める。
 スマホの 127.0.0.1:15900 を PC に届け (adb reverse)、スマホの Chrome で合言葉入りの URL を開く。
@@ -38,6 +39,7 @@ import vnc_probe_check as ck  # noqa: E402
 import wintabdock as td  # noqa: E402
 
 OUT = Path(__file__).resolve().parent / "experiments" / "out"
+LAN = sys.argv[sys.argv.index("--lan") + 1] if "--lan" in sys.argv else None  # Wi-Fi でつなぐときの PC のアドレス
 
 
 def tk_get(dock: td.Dock, fn):
@@ -62,11 +64,13 @@ def steps(dock: td.Dock) -> None:
                 break
             time.sleep(0.1)
         url = dock.remote_server.url
-        va.adb("reverse", f"tcp:{remote.DEFAULT_PORT}", f"tcp:{remote.DEFAULT_PORT}")
+        if not LAN:
+            va.adb("reverse", f"tcp:{remote.DEFAULT_PORT}", f"tcp:{remote.DEFAULT_PORT}")
         va.adb("forward", f"tcp:{va.CDP_PORT}", "localabstract:chrome_devtools_remote")
         va.adb("shell", "input", "keyevent", "KEYCODE_WAKEUP")
+        old = va.tab_ids()
         va.adb("shell", "am", "start", "-a", "android.intent.action.VIEW", "-p", "com.android.chrome", "-d", f"'{url}'")
-        tab_info = va.find_tab()
+        tab_info = va.find_tab(30, LAN or "127.0.0.1", old)
         tab = va.Tab(tab_info["webSocketDebuggerUrl"])
         time.sleep(4)
 
@@ -123,9 +127,13 @@ def steps(dock: td.Dock) -> None:
         ck.check("横向き: noVNC の画面が横長の大きさに変わる", vw2 > vh2 and fb == (vw2, vh2), f"noVNC {fb} / {vw2}x{vh2}")
         log = (HOME / "remote.log").read_text(encoding="utf-8")
         ck.check("Tk が止まらない", "応えない" not in log, "remote.log に「応えない」が無い")
-    except Exception:
+        if LAN:
+            peers = sorted({ln.split(" ")[2].rstrip(":") for ln in log.splitlines() if ": つながった" in ln})
+            ck.check("スマホは Wi-Fi のアドレスからつないできた (USB を通っていない)", peers and "127.0.0.1" not in peers,
+                     f"つないできたアドレス {peers}")
+    except (Exception, SystemExit) as e:  # SystemExit (タブが見つからない など) もここで受ける
         traceback.print_exc()
-        ck.check("途中で止まらない", False)
+        ck.check("途中で止まらない", False, str(e))
     finally:
         va.adb("shell", "settings", "put", "system", "accelerometer_rotation", rotation[0], check=False)
         va.adb("shell", "settings", "put", "system", "user_rotation", rotation[1], check=False)
@@ -137,7 +145,8 @@ def steps(dock: td.Dock) -> None:
             except OSError:
                 pass
         va.adb("forward", "--remove", f"tcp:{va.CDP_PORT}", check=False)
-        va.adb("reverse", "--remove", f"tcp:{remote.DEFAULT_PORT}", check=False)
+        if not LAN:
+            va.adb("reverse", "--remove", f"tcp:{remote.DEFAULT_PORT}", check=False)
         # 試験用の窓を先に閉じてから、ドックを閉じる (ドックを閉じるとこのプロセスが終わり、このスレッドも止まる)
         ck.close_apps([(app1, h1), (app2, h2)])
         dock.call_in_tk(dock.stop_remote)
@@ -150,7 +159,8 @@ def main() -> None:
     if va.adb("get-state", check=False) != "device":
         raise SystemExit("実機がつながっていない、または USB デバッグが未許可")
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
-    dock = td.Dock([], {"auto_adopt": False, "restore_session": False, "remote": {"host": "127.0.0.1"}})
+    print("つなぎ方:", f"Wi-Fi ({LAN})" if LAN else "USB (adb reverse)")
+    dock = td.Dock([], {"auto_adopt": False, "restore_session": False, "remote": {"host": LAN or "127.0.0.1"}})
     dock.root.geometry("900x600+150+120")
     threading.Thread(target=lambda: (time.sleep(1.0), steps(dock)), daemon=True).start()
     dock.root.mainloop()

@@ -87,7 +87,20 @@ uv run check_close.py PortWho RepoTether         # × を押したとき: 一緒
 ```sh
 uv run check_remote.py           # ドックに試験用の窓を 2 つ取り込み、noVNC と同じ WebSocket でつなぐ (21 項目)
 uv run check_remote_android.py   # Android の実機 (USB デバッグ) の Chrome から (9 項目)
+uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi で PC のこのアドレスにつなぐ (USB は試験の操作だけ。10 項目)
 ```
+
+- **Wi-Fi でつなぐときは、Windows のファイアウォールで受信の許可が要る。** 初めて待ち受けるときに出る確認で許可を押さないと、
+  Windows がその Python (exe) の受信を**ブロックする決まり**を自分で作り、以後は確認も出ない。ブロックは許可より強いので、
+  許可を足すだけでは通らない。スマホのブラウザは「接続しています」や接続できないページのままになり、remote.log には
+  「待ち受けを始めた」しか残らない。管理者の PowerShell で、その exe のブロックの決まりを消し、ポート 15900・プライベートだけの
+  許可を足す (2026-10-27 は試験に使う uv の Python 3.13 で、ユーザーがこの手順で通した。配る exe は exe ごとに要る):
+  ```powershell
+  Get-NetFirewallApplicationFilter | Where-Object { $_.Program -like "*<exe の名前>" } | Get-NetFirewallRule |
+    Where-Object { $_.Action -eq "Block" } | Remove-NetFirewallRule
+  New-NetFirewallRule -DisplayName "WinTabDock remote" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 15900 -Profile Private -Program "<exe の道>"
+  ```
+- 家の Wi-Fi は暗号化されていない HTTP なので、同じ Wi-Fi の人には合言葉ごと見えうる。外から使うなら Tailscale (未確認)
 
 - `remote.py` は標準ライブラリだけで書く (exe に Pillow を入れていないので)。撮るのは `PrintWindow`、重ねて縮めるのは GDI の
   `StretchBlt`、送るのは変わった行の帯を zlib で縮めたもの (VNC の Zlib 符号。noVNC が読める)
@@ -110,7 +123,10 @@ uv run check_remote_android.py   # Android の実機 (USB デバッグ) の Chro
   tkinter の呼び出しも来なくなることがあった (数秒〜18 秒。試験の 3 回に 1 回ほど)。Windows の知らせ (`WM_NULL` の Send) には
   すぐ応え、ツールの窓も応えていた。py-spy で見ると Tk のスレッドは `Tcl_WaitForEvent` の `GetMessageW` の中。ドックの窓に
   知らせを 1 つ置く (`PostMessage`) と動き出した。原因は確かめきれていない (`AttachThreadInput` と、ドックが持ち主のツールの窓が
-  絡むと見ている)。`call_in_tk` は頼むたびに知らせを置き、つないでいる間は 50ms ごとに置き続ける。置いてからは 13 回続けて出ていない
+  絡むと見ている)。`call_in_tk` は頼むたびに知らせを置き、つないでいる間は 50ms ごとに置き続ける。置いてからは 13 回続けて出ていない。
+  **切ったあとにも起きた。** 頼み事は 20ms ごとの時計 (`after`) で動くので、1 回起こしても時計の前にまた眠り、試験の最後の
+  `quit` が届かずドックが閉じなかった (Wi-Fi の試験、2026-10-27。ドックの窓に `WM_NULL` を置いたら閉じた)。
+  `call_in_tk` は、頼み事が動くまで 50ms ごとに起こし続ける (`wait=False` でも別のスレッドで起こし続ける)
 - **ドックの大きさを変えた直後は、中身がまだ古い大きさ。** `update_idletasks` だけで並べると、ツールを前の幅のまま置き、遠隔の側が
   「ツールが収まらない」と取り違えてドックを縦に伸ばした。`update` で大きさの変化の知らせを処理してから並べる
 - **画面の外で出した Tk の窓は、`PW_RENDERFULLCONTENT` で撮ると真っ黒や一部だけ黒い** (つないでいる間にタブを切り替えた窓)。
@@ -156,6 +172,10 @@ uv run experiments/vnc_android_check.py                       # Android の実�
   表示を作り直し、その拍子に大きさの監視が反応してまた頼んでくる。今と同じ大きさの頼みには「変えない」(状態 1) と返して止めた。
   この間は最初のタップが時々抜けていたが、止めてからは 3 回続けて全部通った
 - 画面のキーボードを出すと、その分だけブラウザの中が狭くなる (画面写真では下の端がキーボードに隠れた)。大きさを頼み直すかは未確認
+- **前の試験の noVNC のタブが残っていると、それをつかむ。** 試験が落ちて閉じ損ねたタブは、`reconnect=true` で裏でつなぎ直し続ける。
+  URL だけで探すとその裏のタブを選び、JavaScript には応えるがタッチ (`dispatchTouchEvent`) が返らず 10 秒で落ちた。
+  開く前のタブを控えて (`tab_ids`)、新しく開いたタブだけを選ぶ
+- 家の Wi-Fi (192.168.10.x) でも、10 項目が通った (スマホが Wi-Fi のアドレスからつないできたことも確かめる)
 
 ### 試して分かったこと
 
