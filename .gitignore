@@ -4,3 +4,5 @@ docs/selftest-*.png
 build/
 dist/
 wintabdock.toml
+experiments/out/
+.playwright-mcp/
