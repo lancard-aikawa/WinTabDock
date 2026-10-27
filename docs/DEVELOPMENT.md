@@ -86,7 +86,7 @@ uv run check_close.py PortWho RepoTether         # × を押したとき: 一緒
 
 ```sh
 uv run check_remote.py           # ドックに試験用の窓を 2 つ取り込み、noVNC と同じ WebSocket でつなぐ。設定の画面と QR コード、つないでいる間の知らせの窓、表示倍率、絵文字も (43 項目)
-uv run check_remote_android.py   # Android の実機 (USB デバッグ) の Chrome から (14 項目)
+uv run check_remote_android.py   # Android の実機 (USB デバッグ) の Chrome から (13 項目)
 uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi で PC のこのアドレスにつなぐ (USB は試験の操作だけ。14 項目)
 ```
 
