@@ -184,6 +184,18 @@ def start_app(tag: str, min_width: int | None = None) -> tuple[subprocess.Popen,
     raise SystemExit("試験用の窓が出ない")
 
 
+def close_apps(apps) -> None:
+    """試験用の窓を閉じ、プロセスが終わるのを待つ。終わらなければ起動役ごと止める
+    (uv の .venv の python.exe は起動役で、窓を持つ本体は子プロセス。起動役だけ止めても本体が残る)。"""
+    for _, h in apps:
+        vp.user32.PostMessageW(h, vp.WM_CLOSE, 0, 0)
+    for app, _ in apps:
+        try:
+            app.wait(10)
+        except subprocess.TimeoutExpired:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(app.pid)], capture_output=True)
+
+
 COVER = """
 import ctypes, sys, tkinter as tk
 ctypes.windll.shcore.SetProcessDpiAwareness(2)

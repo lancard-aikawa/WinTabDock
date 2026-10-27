@@ -33,6 +33,8 @@ from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
 
+import remote
+
 # ── Win32 ────────────────────────────────────────────────────────────────────
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -82,6 +84,7 @@ VK_LBUTTON = 0x01
 user32.keybd_event.argtypes = [wintypes.BYTE, wintypes.BYTE, wintypes.DWORD, ctypes.c_size_t]
 user32.GetForegroundWindow.restype = wintypes.HWND
 user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+user32.GetSystemMetrics.argtypes = [ctypes.c_int]
 
 kernel32.OpenProcess.restype = wintypes.HANDLE
 kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
@@ -345,6 +348,67 @@ class Tab:
     exe: str = ""  # normcase 済み。同じツールの二重起動を避けるため
     owner: int = 0  # 取り込む前の所有者 (ふつうは 0)
     pid: int = 0  # 窓のプロセス。自動取り込みで、同じプロセスの 2 つ目の窓 (設定画面など) をタブにしないため
+    button_hwnd: int = 0  # タブのボタンの窓。遠隔から押してよい所か見分けるため (別のスレッドから Tk に触らない)
+
+
+class RemoteSource:
+    """ドックを遠隔 (remote.py) に見せる。別のスレッドから呼ばれるので、Tk には触らず Win32 だけで調べる。
+    見せるのはドックの内側と、選んでいるツール (と、そのツールが出したダイアログ)。"""
+
+    def __init__(self, dock: "Dock"):
+        self.dock = dock
+
+    def _active(self) -> int:
+        t = self.dock.active
+        return t.hwnd if t and user32.IsWindow(t.hwnd) and user32.IsWindowVisible(t.hwnd) else 0
+
+    def layers(self) -> list:
+        d = self.dock.dock_hwnd
+        ox, oy = remote.client_origin(d)
+        w, h = remote.client_size(d)
+        out = [(d, 0, 0, w, h)]
+        a = self._active()
+        if a:
+            for hwnd in [a] + owned_popups(a):
+                x, y = remote.client_origin(hwnd)
+                out.append((hwnd, x - ox, y - oy, *remote.client_size(hwnd)))
+        return out
+
+    def extent(self) -> tuple[int, int]:
+        layers = self.layers()[:2]  # ドックと選んでいるツール (ダイアログははみ出したら切る)
+        return max(x + w for _, x, _, w, _ in layers), max(y + h for _, _, y, _, h in layers)
+
+    def set_client_size(self, w: int, h: int) -> None:
+        self.dock.call_in_tk(lambda: self.dock.remote_resize(w, h))
+
+    def key_window(self) -> int:
+        return self._active()
+
+    def click_allowed(self, top: int, child: int, mask: int) -> bool:
+        if top != self.dock.dock_hwnd:
+            return True
+        # ドックで押せるのはタブ (左ボタン) だけ。「+ 起動」「設定」やタブの右クリックはメニューを出し、
+        # メニューは別の窓なので遠隔からは見えず、開いている間ドックが止まる
+        return mask & 7 == 1 and child in {t.button_hwnd for t in self.dock.tabs}
+
+    def connected(self, on: bool) -> None:
+        self.dock.call_in_tk(lambda: self.dock.remote_connected(on), wait=False)
+
+    def title(self) -> str:
+        return "WinTabDock"
+
+
+def owned_popups(hwnd: int) -> list[int]:
+    """hwnd が持ち主の、見えている窓 (ダイアログなど)。"""
+    found: list[int] = []
+
+    def cb(h, _):
+        if user32.GetWindow(h, GW_OWNER) == hwnd and user32.IsWindowVisible(h):
+            found.append(h)
+        return True
+
+    user32.EnumWindows(WNDENUMPROC(cb), 0)
+    return found[::-1]  # EnumWindows は手前から。重ねるのは奥から
 
 
 TAB_BG, TAB_ACTIVE, TAB_FG, TAB_FG_DIM, BAR_BG = "#252542", "#7c3aed", "#ffffff", "#9a9ab8", "#1a1a2e"
@@ -363,6 +427,11 @@ class Dock:
         self.prefs_path = prefs_path or STATE_DIR / "settings.json"
         self.prefs = self.load_prefs()
         self.ignored: set[int] = set()  # 「ドックから外す」で外した窓。すぐ自動で取り込み直さない
+        self.remote_settings = settings.get("remote", {})  # wintabdock.toml の [remote] (host, port)
+        self.remote_server: remote.Server | None = None
+        self._remote_geometry: str | None = None  # 遠隔からつないでいる間 (ドックを画面の外に置く間) の、元の大きさ・位置
+        self._tk_calls: queue.SimpleQueue = queue.SimpleQueue()  # 別のスレッドから Tk で動かしてほしいこと
+        self.dock_hwnd = 0
         self._closing = False
         self.tabs: list[Tab] = []
         self.active: Tab | None = None
@@ -412,6 +481,9 @@ class Dock:
             threading.Thread(target=self._watch_windows, daemon=True).start()
             self.root.after(150, self._drain_shown)
         self.root.after(300, lambda: self.startup(session))
+        self.root.after(20, self._drain_tk_calls)
+        if self.prefs.get("remote"):
+            self.root.after(600, self.start_remote)
 
     # ── 自動取り込み / 前回のタブ ──
     def _watch_windows(self) -> None:
@@ -508,7 +580,9 @@ class Dock:
         if self._closing:
             return
         registered = {t["name"] for t in self.tools}
-        data = {"geometry": self.root.geometry(), "tabs": [t.name for t in self.tabs if t.name in registered],
+        # 遠隔からつないでいる間は、画面の外ではなく元の大きさ・位置を覚える (落ちても次は画面の上に開くように)
+        geometry = self._remote_geometry or self.root.geometry()
+        data = {"geometry": geometry, "tabs": [t.name for t in self.tabs if t.name in registered],
                 "active": self.active.name if self.active else None}
         self.session_path.parent.mkdir(parents=True, exist_ok=True)
         self.session_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
@@ -574,6 +648,7 @@ class Dock:
         tab.button.bind("<Button-2>", lambda e, t=tab: self.close_tab(t))  # 中クリックでツールを閉じる
         tab.button.bind("<Button-3>", lambda e, t=tab: self.tab_menu(e, t))
         tab.button.pack(side=tk.LEFT, padx=(4, 0), pady=4)
+        tab.button_hwnd = tab.button.winfo_id()
         self.empty.place_forget()
         self.select(tab)
 
@@ -609,6 +684,11 @@ class Dock:
         self.active = tab
         self.place_active(show=True)
         self.save_session()
+        view = self.remote_server.view if self.remote_server else None
+        if view and view.requested:
+            # 遠隔からつないでいる間は、切り替えたツールに合わせて大きさを合わせ直す (最小の幅のあるツールなら縦に伸ばす)。
+            # 合わせ直しは Tk のスレッドの仕事を待つので、別のスレッドから頼む
+            threading.Thread(target=view.resize, args=view.requested, daemon=True).start()
 
     def body_rect(self) -> tuple[int, int, int, int]:
         self.root.update_idletasks()
@@ -695,6 +775,15 @@ class Dock:
             m.add_checkbutton(label="ログイン時に起動する", variable=self._autostart_var,
                               command=lambda: set_autostart(self._autostart_var.get()))
         m.add_separator()
+        self._remote_var = tk.BooleanVar(value=self.remote_server is not None)
+        m.add_checkbutton(label="スマホから使う (ブラウザで開く)", variable=self._remote_var,
+                          command=lambda: self.start_remote() if self._remote_var.get() else self.stop_remote())
+        if self.remote_server:
+            s = self.remote_server
+            m.add_command(label=f"    {s.host}:{s.port} で待っています", state=tk.DISABLED)  # 状態の表示 (押せない)
+            m.add_command(label="    つなぐ URL をコピー", command=self.copy_remote_url)
+            m.add_command(label="    合言葉を作り直す (前の URL は使えなくなる)", command=self.renew_remote_token)
+        m.add_separator()
         m.add_command(label=f"WinTabDock {__version__}", state=tk.DISABLED)  # 版の表示 (押せない)
         return m
 
@@ -724,6 +813,129 @@ class Dock:
     def on_startup_tools(self) -> None:
         self.prefs["startup_tools"] = [n for n, v in self._startup_tool_vars.items() if v.get()]
         self.save_prefs()
+
+    # ── 遠隔 (スマホのブラウザから使う。remote.py) ──
+    def call_in_tk(self, fn, wait: bool = True, timeout: float = 5.0) -> None:
+        """別のスレッドから、Tk のスレッドで fn を動かす (Tk は作ったスレッドからしか触れない)。"""
+        done = threading.Event()
+        self._tk_calls.put((fn, done))
+        self._wake_tk()
+        if wait and not done.wait(timeout):
+            self.remote_log(f"Tk のスレッドが {timeout} 秒応えない ({getattr(fn, '__name__', fn)})")
+
+    def _wake_tk(self) -> None:
+        """Tk のスレッドを起こす (ドックの窓に知らせを 1 つ置く)。
+        遠隔からつないでいる間、Tk が GetMessage で眠ったまま、時計 (after) の知らせが来なくなることがあった
+        (数秒から 18 秒。別のスレッドからの tkinter の呼び出しも戻らない)。知らせを 1 つ置くと動き出した。
+        原因は確かめきれていない (入力の状態の共有 AttachThreadInput と、ドックが持ち主のツールの窓が絡むと見ている)"""
+        if self.dock_hwnd:
+            user32.PostMessageW(self.dock_hwnd, 0, 0, 0)  # WM_NULL
+
+    def _keep_tk_awake(self) -> None:
+        """つないでいる間 (ドックが画面の外にある間)、50ms ごとに Tk を起こす。"""
+        while self._remote_geometry and not self._closing:
+            self._wake_tk()
+            time.sleep(0.05)
+
+    def _drain_tk_calls(self) -> None:
+        while not self._tk_calls.empty():
+            fn, done = self._tk_calls.get()
+            try:
+                fn()
+            finally:
+                done.set()
+        self.root.after(20, self._drain_tk_calls)
+
+    def remote_log(self, msg: str) -> None:
+        line = time.strftime("%Y-%m-%d %H:%M:%S ") + msg + "\n"
+        try:
+            with open(STATE_DIR / "remote.log", "a", encoding="utf-8") as f:
+                f.write(line)
+        except OSError:
+            pass
+
+    def start_remote(self) -> None:
+        """待ち受けを始める。noVNC の取得 (初回はダウンロード) は別のスレッドで行い、Tk を止めない。"""
+        if self.remote_server:
+            return
+        cfg = self.remote_settings
+        host = cfg.get("host") or remote.tailscale_ip() or "127.0.0.1"
+        port = int(cfg.get("port", remote.DEFAULT_PORT))
+        token = self.prefs.get("remote_token") or remote.new_token()
+        self.prefs.update(remote=True, remote_token=token)
+        self.save_prefs()
+        self.root.update_idletasks()
+        self.dock_hwnd = self.hwnd
+
+        def prepare() -> None:
+            try:
+                web_root = remote.novnc_dir(STATE_DIR)
+                server = remote.Server(remote.View(RemoteSource(self)), host, port, token, web_root, self.remote_log)
+                server.start()
+            except OSError as e:
+                self.call_in_tk(lambda: self.remote_failed(f"{host}:{port} で待ち受けられませんでした。\n{e}"), wait=False)
+                return
+            self.remote_log(f"待ち受けを始めた {host}:{port}")
+            self.call_in_tk(lambda: setattr(self, "remote_server", server), wait=False)
+
+        threading.Thread(target=prepare, daemon=True).start()
+
+    def remote_failed(self, msg: str) -> None:
+        from tkinter import messagebox
+        self.prefs["remote"] = False
+        self.save_prefs()
+        messagebox.showerror("WinTabDock", msg, parent=self.root)
+
+    def stop_remote(self) -> None:
+        self.prefs["remote"] = False
+        self.save_prefs()
+        if self.remote_server:
+            self.remote_server.stop()
+            self.remote_server = None
+        if self._remote_geometry:
+            self.remote_connected(False)
+
+    def copy_remote_url(self) -> None:
+        if self.remote_server:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(self.remote_server.url)
+
+    def renew_remote_token(self) -> None:
+        self.prefs["remote_token"] = remote.new_token()
+        self.save_prefs()
+        if self.remote_server:
+            self.remote_server.stop()
+            self.remote_server = None
+            self.start_remote()
+
+    def remote_connected(self, on: bool) -> None:
+        """つないでいる間はドックを画面の外 (右の外) に置く。手元のほかの窓が重なっていると、Tk のボタンは
+        窓へのメッセージで押せない (WindowFromPoint で見ているらしい)。切れたら元の大きさ・位置に戻す。"""
+        if on and not self._remote_geometry:
+            if self.root.state() == "iconic":
+                self.root.deiconify()
+            self._remote_geometry = self.root.geometry()
+            x = user32.GetSystemMetrics(76) + user32.GetSystemMetrics(78) + 100  # 仮想画面の右端の外
+            self.root.geometry(f"+{x}+{user32.GetSystemMetrics(77)}")
+            threading.Thread(target=self._keep_tk_awake, daemon=True).start()
+            self.remote_log("つながったので、ドックを画面の外に置いた")
+        elif not on and self._remote_geometry:
+            geometry, self._remote_geometry = self._remote_geometry, None
+            self.root.geometry(geometry)
+            self.root.update_idletasks()
+            self.place_active(show=True)
+            self.remote_log("切れたので、ドックを元の場所に戻した")
+
+    def remote_resize(self, w: int, h: int) -> None:
+        """遠隔の画面の大きさに、ドックの内側を合わせる (ツールは place_active でついてくる)。"""
+        if self.root.state() == "iconic":
+            self.root.deiconify()
+        self.root.geometry(f"{max(200, w)}x{max(120, h)}")
+        # 窓の大きさが変わった知らせ (Configure) を処理してから並べる。update_idletasks だけでは中身がまだ古い大きさで、
+        # ツールを前の幅のまま置き、遠隔の側が「ツールが収まらない」と取り違えてドックを縦に伸ばした
+        self.root.update()
+        self.place_active()
+        self.remote_log(f"ドックの内側を {w}x{h} にした → {remote.client_size(self.dock_hwnd)}")
 
     # ── 閉じるとき ──
     ON_CLOSE_MODES = {"ask": "毎回たずねる", "close": "一緒に閉じる", "keep": "元の窓に戻して残す"}
@@ -823,6 +1035,9 @@ class Dock:
     def quit(self) -> None:
         self.save_session()  # 窓を戻す前に並びを覚える (戻すたびに保存すると空になる)
         self._closing = True
+        if self.remote_server:
+            self.remote_server.stop()
+            self.remote_server = None
         for t in list(self.tabs):
             self.release(t)
         if STATE.exists():
