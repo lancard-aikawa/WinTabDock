@@ -431,9 +431,18 @@ class RemoteSource:
 NOT_POPUPS = {"#32768", "IME", "MSCTFIME UI", "tooltips_class32", "THintWindow", "SysShadow"}
 
 
+def is_app_window(hwnd: int) -> bool:
+    """タスクバーに出る普通のアプリの窓 (持ち主が無く、タイトルバーがあり、WS_EX_TOOLWINDOW でない)。"""
+    ex = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
+    return (not user32.GetWindow(hwnd, GW_OWNER) and user32.GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CAPTION == WS_CAPTION
+            and bool(ex & WS_EX_APPWINDOW or not ex & WS_EX_TOOLWINDOW))
+
+
 def tool_popups(hwnd: int, exclude: set[int]) -> list[int]:
     """ツール hwnd が出した、見えている窓 (ダイアログなど)。hwnd が持ち主の窓と、同じプロセスのほかの窓
-    (持ち主の無い小窓もある)。exclude (タブにしている窓・ドック) と、大きさの無い窓 (Delphi の TApplication) は除く。"""
+    (持ち主の無い小窓もある)。exclude (タブにしている窓・ドック) と、大きさの無い窓 (Delphi の TApplication) は除く。
+    同じプロセスでも、普通のアプリの窓は除く。VS Code はどの窓も 1 つのプロセスなので、ほかの VS Code の窓まで
+    小窓としてドックの上へ移し、スマホの画面では帯ごと覆った (ユーザーの報告、2026-10-28)"""
     pid = window_pid(hwnd)
     found: list[int] = []
     buf = ctypes.create_unicode_buffer(32)
@@ -441,7 +450,7 @@ def tool_popups(hwnd: int, exclude: set[int]) -> list[int]:
     def cb(h, _):
         if h == hwnd or h in exclude or not user32.IsWindowVisible(h):
             return True
-        if user32.GetWindow(h, GW_OWNER) == hwnd or window_pid(h) == pid:
+        if user32.GetWindow(h, GW_OWNER) == hwnd or (window_pid(h) == pid and not is_app_window(h)):
             user32.GetClassNameW(h, buf, 32)
             _, _, w, hh = rect_of(h)
             if buf.value not in NOT_POPUPS and w > 0 and hh > 0:
@@ -597,15 +606,16 @@ class Dock:
     def maybe_adopt_remote(self, hwnd: int) -> None:
         """遠隔でつないでいる間に開いた窓を、どのアプリのものでもタブにして選ぶ (スマホに出す)。ツールが外のアプリ
         (RepoTether が開く VS Code・ターミナル・エクスプローラーなど) を開くと、PC の画面に出てスマホからは見えなかった。
-        すでにタブにしているアプリの 2 つ目の窓は、タブにせず小窓として重ねる (RemoteSource)。切ってもタブのまま残す"""
+        すでにタブにしているアプリの 2 つ目の窓は、タブにせず小窓として重ねる (RemoteSource)。ただし普通のアプリの窓
+        (VS Code の 2 つ目の窓など) は別のタブにする。切ってもタブのまま残す"""
         if self._closing or hwnd in self.ignored or hwnd == self.hwnd or any(t.hwnd == hwnd for t in self.tabs):
             return
         if (not user32.IsWindow(hwnd) or not user32.IsWindowVisible(hwnd) or user32.GetWindow(hwnd, GW_OWNER)
                 or user32.GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CAPTION != WS_CAPTION or not window_title(hwnd)):
             return
         pid = window_pid(hwnd)
-        if any(t.pid == pid for t in self.tabs):
-            return
+        if any(t.pid == pid for t in self.tabs) and not is_app_window(hwnd):
+            return  # 小窓として重ねる (tool_popups)。VS Code の 2 つ目の窓のような普通のアプリの窓は、別のタブにする
         exe = process_path(pid)
         tool = self.tool_of_exe(exe)
         self.remote_log(f"つないでいる間に開いた窓をタブにした: {window_title(hwnd)} ({Path(exe).name})")

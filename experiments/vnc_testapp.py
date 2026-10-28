@@ -7,6 +7,7 @@
 """
 
 import ctypes
+import os
 import sys
 import tkinter as tk
 
@@ -53,4 +54,8 @@ entry.bind("<Control-s>", lambda e: (text.set(text.get() + "[S]"), entry.icursor
 for seq in ("<ButtonPress>", "<ButtonRelease>", "<Enter>", "<Leave>", "<KeyPress>", "<FocusIn>"):
     root.bind_all(seq, note, add="+")
 update_title()
+if os.environ.get("VNC_TESTAPP_SECOND"):  # 同じプロセスのもう 1 つの普通の窓 (VS Code の 2 つ目の窓の代わり)
+    second = tk.Toplevel(root)
+    second.title(f"vnc-testapp {TAG}-second")
+    second.geometry("300x200+700+160")
 root.mainloop()

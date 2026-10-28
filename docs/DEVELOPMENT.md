@@ -85,7 +85,7 @@ uv run check_close.py PortWho RepoTether         # × を押したとき: 一緒
 「設定」の「スマホから使う」で入り切りする (入れたかは settings.json の `remote` に覚え、次の起動でも始める)。
 
 ```sh
-uv run check_remote.py           # ドックに試験用の窓を 3 つ取り込み、noVNC と同じ WebSocket でつなぐ。設定の画面と QR コード、つないでいる間の知らせの窓、表示倍率、絵文字・日本語の変換・カタカナ (Tk と、Tk でない EDIT の窓)、ツールが開くメニューと小窓、つないでいる間に開いた外のアプリの窓、Ctrl・Shift (Tk と EDIT)、クリップボードも 、「+ 開く」の一覧、最大化する窓も (79 項目。人の WinTabDock が Wi-Fi で待ち受けていると 75)
+uv run check_remote.py           # ドックに試験用の窓を 3 つ取り込み、noVNC と同じ WebSocket でつなぐ。設定の画面と QR コード、つないでいる間の知らせの窓、表示倍率、絵文字・日本語の変換・カタカナ (Tk と、Tk でない EDIT の窓)、ツールが開くメニューと小窓、つないでいる間に開いた外のアプリの窓、Ctrl・Shift (Tk と EDIT)、クリップボードも 、「+ 開く」の一覧、最大化する窓、同じプロセスのもう 1 つの窓も (81 項目。人の WinTabDock が Wi-Fi で待ち受けていると 77)
 uv run check_remote_android.py   # Android の実機 (USB デバッグ) の Chrome から。メニューと小窓、iPad の日本語の入力の並び、キーの記録、noVNC の「Ctrl」とクリップボードの欄、「+ 開く」も (24 項目)
 uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi で PC のこのアドレスにつなぐ (USB は試験の操作だけ。25 項目)
 ```
@@ -148,6 +148,11 @@ uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi �
   前面も動かさない (隠した窓にも効く)。最大化していたことは `Tab.maximized` (state.json にも) に覚え、外すときに最大化に戻す。
   再現は、試験用の VS Code を `--user-data-dir` を分けて起動する (人の VS Code とは別のプロセスになる)。VS Code の中から
   起動すると、引き継いだ `ELECTRON_RUN_AS_NODE` などで Code.exe が窓を出さずに終わる (終了コード 9)。それらを外して起動する
+- **同じプロセスの窓を全部「ツールの小窓」と見ると、VS Code では別の窓まで重なる**: 小窓には持ち主の無いもの (Delphi の
+  フォーム) もあるので、同じプロセスの見えている窓を小窓として重ねていた。VS Code はどの窓も 1 つのプロセスなので、
+  人が PC で使っている別の VS Code の窓までドックの上へ移し、一番上に描いて、スマホでは帯ごと覆った (ユーザーの報告と
+  iPad の画面写真、2026-10-28。最大化を直したあとも残った)。持ち主が無く、タイトルバーがあり、`WS_EX_TOOLWINDOW` で
+  ない窓 (`is_app_window`。タスクバーに出る普通の窓) は小窓にしない。つないでいる間に開いたら別のタブにする
 - 記録は `%LOCALAPPDATA%\WinTabDock\remote.log`
 
 ### ドックに組み込んで分かったこと

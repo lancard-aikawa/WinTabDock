@@ -421,6 +421,7 @@ def steps(dock: td.Dock) -> None:
               f"選んでいるタブ {dock.active and dock.active.name} {layer}")
         launch_steps(dock, c, apps)
         maximize_steps(dock, apps)
+        second_window_steps(dock, apps)
 
         c.close()
         c = None
@@ -584,6 +585,40 @@ def maximize_steps(dock: td.Dock, apps: list) -> None:
     check("最大化した窓をタブにしても、最大化を解いて帯の下に収め、最大化していたことを覚える",
           not td.user32.IsZoomed(hwnd) and layer is not None and layer[2] == body_y and tab is not None and tab.maximized,
           f"最大化 {td.user32.IsZoomed(hwnd)} 写す位置 {layer} 覚えた {tab and tab.maximized}")
+
+
+def second_window_steps(dock: td.Dock, apps: list) -> None:
+    """同じプロセスのもう 1 つの普通の窓 (VS Code はどの窓も 1 つのプロセス)。小窓としてドックの上へ移して重ねると、
+    スマホの画面で帯ごと覆った。つないでいる間に開いたら別のタブにし、タブにしていなければ重ねない"""
+    tag = f"r{os.getpid()}s"
+    os.environ["VNC_TESTAPP_SECOND"] = "1"
+    try:
+        app = ck.start_app(tag)
+    finally:
+        del os.environ["VNC_TESTAPP_SECOND"]
+    apps.append(app)
+    main = app[1]
+    second = 0
+    for _ in range(50):
+        # タブにした窓は隠れるので、top_windows (見えている窓) ではなくタブから探す
+        second = next((h for h in [t.hwnd for t in dock.tabs] + td.top_windows()
+                       if td.window_title(h) == f"vnc-testapp {tag}-second"), 0)
+        if second and {main, second} <= {t.hwnd for t in dock.tabs}:
+            break
+        time.sleep(0.1)
+    check("つないでいる間に開いた、同じプロセスのもう 1 つの普通の窓は、別のタブになる",
+          bool(second) and {main, second} <= {t.hwnd for t in dock.tabs}, str([t.name for t in dock.tabs]))
+    tab2 = next((t for t in dock.tabs if t.hwnd == second), None)
+    if tab2:
+        dock.call_in_tk(lambda: dock.release(tab2))  # 人の画面にある、タブにしていない窓にする (報告の形)
+    time.sleep(0.5)
+    before = td.rect_of(second)
+    dock.call_in_tk(lambda: dock.select(next(t for t in dock.tabs if t.hwnd == main)))
+    time.sleep(1.0)
+    layers = [lay[0] for lay in RemoteSource_layers(dock)]
+    check("タブにしていない、同じプロセスの普通の窓は、ドックの上へ移さず、スマホの画面にも重ねない",
+          second not in layers and td.rect_of(second) == before and main in layers,
+          f"重ねる窓 {layers} 窓の位置 {before} → {td.rect_of(second)}")
 
 
 def panel_steps(dock: td.Dock, token: str) -> None:
