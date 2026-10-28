@@ -125,6 +125,10 @@ uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi �
   - TLS は `ssl.SSLSocket` でなく `MemoryBIO` で包み (`TlsConn`)、TLS の処理を 1 つの錠の中で行う。受けるスレッドと
     画面を送るスレッドが同じ接続を使うが、OpenSSL の 1 つの接続を 2 つのスレッドから同時に触ってはいけない
   - noVNC 1.6.0 は `navigator.clipboard` を使っていない。HTTPS にしても、クリップボードの欄を通す今の写し方は変わらない
+  - Android で CA 証明書を入れる場所は機種で名前が違う。入れ方のページに書く道は、実機を adb で開いて画面の文字
+    (`uiautomator dump`) を読んで確かめる。moto g05 (Android 15) は「セキュリティとプライバシー」→「その他のセキュリティと
+    プライバシー」→ 下の「セキュリティ」の欄の「暗号化と認証情報」→「証明書のインストール」。最初は確かめずに
+    「その他のセキュリティ設定」と書き、ユーザーが見つけられなかった (2026-10-29)
 
 - `remote.py` は標準ライブラリだけで書く (exe に Pillow を入れていないので)。撮るのは `PrintWindow`、重ねて縮めるのは GDI の
   `StretchBlt`、送るのは変わった行の帯を zlib で縮めたもの (VNC の Zlib 符号。noVNC が読める)
