@@ -45,7 +45,7 @@ GWL_STYLE, GWL_EXSTYLE, GWLP_HWNDPARENT = -16, -20, -8  # トップレベルの�
 WS_CAPTION, WS_THICKFRAME = 0x00C00000, 0x00040000
 WS_MINIMIZEBOX, WS_MAXIMIZEBOX, WS_SYSMENU = 0x00020000, 0x00010000, 0x00080000
 WS_EX_TOOLWINDOW, WS_EX_APPWINDOW = 0x00000080, 0x00040000
-SW_HIDE, SW_SHOWNOACTIVATE, SW_SHOW, SW_RESTORE = 0, 4, 5, 9
+SW_HIDE, SW_SHOWNOACTIVATE, SW_SHOW, SW_MAXIMIZE, SW_RESTORE = 0, 4, 5, 3, 9
 SWP_NOSIZE, SWP_NOMOVE, SWP_NOZORDER, SWP_NOACTIVATE, SWP_FRAMECHANGED = 0x1, 0x2, 0x4, 0x10, 0x20
 HWND_TOP = 0
 GW_OWNER = 4
@@ -74,6 +74,7 @@ user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
 user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 user32.IsIconic.argtypes = [wintypes.HWND]
+user32.IsZoomed.argtypes = [wintypes.HWND]
 user32.WindowFromPoint.restype = wintypes.HWND
 user32.WindowFromPoint.argtypes = [wintypes.POINT]
 user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
@@ -255,7 +256,7 @@ STATE = state_path()  # このドックの控え
 def save_state(tabs: list["Tab"]) -> None:
     STATE.parent.mkdir(parents=True, exist_ok=True)
     STATE.write_text(json.dumps([{"hwnd": t.hwnd, "style": t.style, "exstyle": t.exstyle, "rect": t.rect,
-                                  "owner": t.owner} for t in tabs]), encoding="utf-8")
+                                  "owner": t.owner, "maximized": t.maximized} for t in tabs]), encoding="utf-8")
 
 
 def other_docks() -> list[int]:
@@ -263,7 +264,8 @@ def other_docks() -> list[int]:
     return [h for h in top_windows() if window_title(h) == "WinTabDock" and window_pid(h) != os.getpid()]
 
 
-def restore_window(hwnd: int, style: int, exstyle: int, rect: tuple[int, int, int, int], owner: int = 0) -> None:
+def restore_window(hwnd: int, style: int, exstyle: int, rect: tuple[int, int, int, int], owner: int = 0,
+                   maximized: bool = False) -> None:
     if not user32.IsWindow(hwnd):
         return
     user32.ShowWindow(hwnd, SW_HIDE)  # 拡張スタイルの変更をタスクバーに反映させるため、一度隠す
@@ -272,7 +274,7 @@ def restore_window(hwnd: int, style: int, exstyle: int, rect: tuple[int, int, in
     user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, exstyle)
     x, y, w, h = rect
     user32.SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED)
-    user32.ShowWindow(hwnd, SW_SHOW)
+    user32.ShowWindow(hwnd, SW_MAXIMIZE if maximized else SW_SHOW)
     # 属性を元に戻して見せても、タスクバーがボタンを付け直さないことがある (自動で取り込んだ PortWho で、
     # ドックを閉じたあとタスクバーに出なかった)。所有者なし・WS_EX_TOOLWINDOW なしの窓だけ、明示的に足す
     if not owner and not exstyle & WS_EX_TOOLWINDOW:
@@ -313,7 +315,8 @@ def _restore_file(path: Path) -> int:
     n = 0
     for s in json.loads(path.read_text(encoding="utf-8")):
         if user32.IsWindow(s["hwnd"]):
-            restore_window(s["hwnd"], s["style"], s["exstyle"], tuple(s["rect"]), s.get("owner", 0))
+            restore_window(s["hwnd"], s["style"], s["exstyle"], tuple(s["rect"]), s.get("owner", 0),
+                           s.get("maximized", False))
             n += 1
     path.unlink()
     return n
@@ -349,6 +352,7 @@ class Tab:
     exe: str = ""  # normcase 済み。同じツールの二重起動を避けるため
     owner: int = 0  # 取り込む前の所有者 (ふつうは 0)
     pid: int = 0  # 窓のプロセス。自動取り込みで、同じプロセスの 2 つ目の窓 (設定画面など) をタブにしないため
+    maximized: bool = False  # 取り込む前に最大化していた (外すときに最大化に戻す)
     button_hwnd: int = 0  # タブのボタンの窓。遠隔から押してよい所か見分けるため (別のスレッドから Tk に触らない)
 
 
@@ -723,13 +727,20 @@ class Dock:
     def adopt(self, name: str, hwnd: int) -> None:
         if any(t.hwnd == hwnd for t in self.tabs) or hwnd == self.hwnd:
             return
-        if user32.IsIconic(hwnd):
+        # 最大化した窓は、ドックが大きさと位置を決めても、画面いっぱいのまま動かない (VS Code の新しい窓は最大化して開く。
+        # 画面いっぱいのまま重なり、スマホでは帯ごと隠れた)。最大化を解いてから控え、外すときに最大化に戻す
+        maximized = False
+        for _ in range(2):  # 最大化してから最小化した窓は、1 回目で最大化に戻る
+            if not (user32.IsIconic(hwnd) or user32.IsZoomed(hwnd)):
+                break
+            maximized = maximized or bool(user32.IsZoomed(hwnd))
             user32.ShowWindow(hwnd, SW_RESTORE)
+        maximized = maximized or bool(user32.IsZoomed(hwnd))
         style = user32.GetWindowLongPtrW(hwnd, GWL_STYLE)
         exstyle = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
         pid = window_pid(hwnd)
         tab = Tab(name, hwnd, style, exstyle, rect_of(hwnd), exe=os.path.normcase(process_path(pid)),
-                  owner=user32.GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT), pid=pid)
+                  owner=user32.GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT), pid=pid, maximized=maximized)
         self.tabs.append(tab)
         save_state(self.tabs)  # 変える前に控える
         user32.ShowWindow(hwnd, SW_HIDE)
@@ -750,7 +761,7 @@ class Dock:
 
     def release(self, tab: Tab) -> None:
         self.ignored.add(tab.hwnd)  # 元に戻すと窓が現れるので、自動取り込みがすぐ取り込み直してしまう
-        restore_window(tab.hwnd, tab.style, tab.exstyle, tab.rect, tab.owner)
+        restore_window(tab.hwnd, tab.style, tab.exstyle, tab.rect, tab.owner, tab.maximized)
         self.forget(tab)
 
     def forget(self, tab: Tab) -> None:
@@ -795,6 +806,11 @@ class Dock:
         if not self.active:
             return
         x, y, w, h = self.body_rect()
+        if user32.IsZoomed(self.active.hwnd):
+            # タブにしたあとでツールが自分で最大化した (VS Code は開いた少しあとで前回の最大化に戻す)。最大化のままでは
+            # 位置と大きさを決めても動かない。前に出さずに解いてから置く。外すときは最大化に戻す
+            self.active.maximized = True
+            user32.ShowWindow(self.active.hwnd, SW_SHOWNOACTIVATE)
         user32.SetWindowPos(self.active.hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE)
         if show:
             user32.ShowWindow(self.active.hwnd, SW_SHOWNOACTIVATE)
@@ -826,6 +842,10 @@ class Dock:
         for t in list(self.tabs):
             if not user32.IsWindow(t.hwnd):
                 self.forget(t)
+        if (self.active and user32.IsZoomed(self.active.hwnd) and self.root.state() != "iconic"
+                and not self.launch_panel):  # 一覧を開いている間は隠している (置き直すと出てしまう)
+            self.remote_log(f"「{self.active.name}」が最大化したので、解いてドックに収め直した")
+            self.place_active()  # 表示中のツールが自分で最大化した。最大化を解いて置き直す
         self.root.after(500, self.poll)
 
     # ── メニュー ──

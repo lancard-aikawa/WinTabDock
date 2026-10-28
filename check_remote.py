@@ -420,6 +420,7 @@ def steps(dock: td.Dock) -> None:
               bool(dock.active) and dock.active.hwnd == later[1] and layer[0] == later[1] and layer[1] >= 0,
               f"選んでいるタブ {dock.active and dock.active.name} {layer}")
         launch_steps(dock, c, apps)
+        maximize_steps(dock, apps)
 
         c.close()
         c = None
@@ -543,6 +544,46 @@ def launch_steps(dock: td.Dock, c: Client, apps: list) -> None:
     finally:
         del dock.launch
         dock.tools = []
+
+
+def maximize_steps(dock: td.Dock, apps: list) -> None:
+    """タブにしたあとでツールが自分で最大化しても、帯の下に収め直す。VS Code は開いた少しあとで前回の最大化に戻し、
+    画面いっぱいのまま重なって、スマホでは帯ごと隠れた。外すときは最大化に戻す"""
+    app = ck.start_app(f"r{os.getpid()}m")
+    apps.append(app)
+    hwnd = app[1]
+    for _ in range(50):
+        if dock.active and dock.active.hwnd == hwnd:
+            break
+        time.sleep(0.1)
+    td.user32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE (ツールが自分で最大化したのと同じ)
+    for _ in range(30):
+        time.sleep(0.1)
+        if not td.user32.IsZoomed(hwnd):
+            break
+    time.sleep(0.5)
+    layer = next((lay for lay in RemoteSource_layers(dock) if lay[0] == hwnd), None)
+    body_y = tk_get(dock, dock.body_rect)[1] - remote.client_origin(dock.dock_hwnd)[1]
+    check("タブにしたあとでツールが最大化しても、最大化を解いて帯の下に収め直す",
+          not td.user32.IsZoomed(hwnd) and layer is not None and layer[1] == 0 and layer[2] == body_y,
+          f"最大化 {td.user32.IsZoomed(hwnd)} 写す位置 {layer} 帯の下 {body_y}")
+    tab = next(t for t in dock.tabs if t.hwnd == hwnd)
+    dock.call_in_tk(lambda: dock.release(tab))
+    time.sleep(0.5)
+    check("最大化していたツールは、ドックから外すと最大化に戻る", bool(td.user32.IsZoomed(hwnd)),
+          f"最大化 {td.user32.IsZoomed(hwnd)} {td.rect_of(hwnd)}")
+    td.user32.ShowWindow(hwnd, 0)  # 人の画面に出したままにしない (最後に閉じる)
+    # 最大化した窓をタブにしても、最大化を解いて収める
+    td.user32.ShowWindow(hwnd, 3)
+    time.sleep(0.5)
+    dock.ignored.discard(hwnd)
+    dock.call_in_tk(lambda: dock.adopt("max", hwnd))
+    time.sleep(0.8)
+    layer = next((lay for lay in RemoteSource_layers(dock) if lay[0] == hwnd), None)
+    tab = next((t for t in dock.tabs if t.hwnd == hwnd), None)
+    check("最大化した窓をタブにしても、最大化を解いて帯の下に収め、最大化していたことを覚える",
+          not td.user32.IsZoomed(hwnd) and layer is not None and layer[2] == body_y and tab is not None and tab.maximized,
+          f"最大化 {td.user32.IsZoomed(hwnd)} 写す位置 {layer} 覚えた {tab and tab.maximized}")
 
 
 def panel_steps(dock: td.Dock, token: str) -> None:
