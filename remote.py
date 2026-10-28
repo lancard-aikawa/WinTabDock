@@ -1202,6 +1202,16 @@ NOVNC_PATCHES = {
     # URL に keylog が付いていたら、キーと入力欄の出来事、PC へ送ったキーを画面の隅に出す (KEYLOG_JS)。
     # iPad が実際に何を出しているかを、iPad の実機が手元に無くても画面写真で見るため
     "vnc.html": ("</head>", '<script type="module" src="wintabdock-keylog.js"></script>\n</head>'),
+    # 「追加のキー」の箱 (Ctrl・Alt など 6 つ) は中身に合わせて幅が決まるのに、中のボタンには「箱の幅の 100% から
+    # 余白を引いた幅まで」という上限が付いていて、幅が 0 に潰れる (noVNC 1.6.0。枠の丸が 6 つ縦に並ぶだけだった)
+    "app/styles/base.css": (
+        "#noVNC_modifiers {\n",
+        "/* WinTabDock: the extra keys panel is as wide as its buttons, so a percent max-width squeezes them to 0 */\n"
+        "#noVNC_modifiers .noVNC_button {\n"
+        "    max-width: none;\n"
+        "}\n"
+        "#noVNC_modifiers {\n",
+    ),
 }
 
 KEYLOG_PATH = "wintabdock-keylog.js"

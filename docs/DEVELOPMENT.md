@@ -85,9 +85,9 @@ uv run check_close.py PortWho RepoTether         # × を押したとき: 一緒
 「設定」の「スマホから使う」で入り切りする (入れたかは settings.json の `remote` に覚え、次の起動でも始める)。
 
 ```sh
-uv run check_remote.py           # ドックに試験用の窓を 3 つ取り込み、noVNC と同じ WebSocket でつなぐ。設定の画面と QR コード、つないでいる間の知らせの窓、表示倍率、絵文字・日本語の変換・カタカナ (Tk と、Tk でない EDIT の窓)、ツールが開くメニューと小窓、つないでいる間に開いた外のアプリの窓、Ctrl・Shift (Tk と EDIT)、クリップボードも (68 項目。人の WinTabDock が Wi-Fi で待ち受けていると 64)
-uv run check_remote_android.py   # Android の実機 (USB デバッグ) の Chrome から。メニューと小窓、iPad の日本語の入力の並び、キーの記録、noVNC の「Ctrl」とクリップボードの欄も (22 項目)
-uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi で PC のこのアドレスにつなぐ (USB は試験の操作だけ。23 項目)
+uv run check_remote.py           # ドックに試験用の窓を 3 つ取り込み、noVNC と同じ WebSocket でつなぐ。設定の画面と QR コード、つないでいる間の知らせの窓、表示倍率、絵文字・日本語の変換・カタカナ (Tk と、Tk でない EDIT の窓)、ツールが開くメニューと小窓、つないでいる間に開いた外のアプリの窓、Ctrl・Shift (Tk と EDIT)、クリップボードも (69 項目。人の WinTabDock が Wi-Fi で待ち受けていると 65)
+uv run check_remote_android.py   # Android の実機 (USB デバッグ) の Chrome から。メニューと小窓、iPad の日本語の入力の並び、キーの記録、noVNC の「Ctrl」とクリップボードの欄も (23 項目)
+uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi で PC のこのアドレスにつなぐ (USB は試験の操作だけ。24 項目)
 ```
 
 - **Wi-Fi でつなぐときは、Windows のファイアウォールで受信の許可が要る。** 初めて待ち受けるときに出る確認で許可を押さないと、
@@ -323,6 +323,9 @@ uv run experiments/vnc_android_check.py                       # Android の実�
   Caps の印には Provide や Request の印も立っているので、先に Caps かを見る (試験のクライアントで中身として読んで失敗した)。
   `OpenClipboard(NULL)` で空けると持ち主が無くなり `SetClipboardData` が失敗するので、使い捨てのメッセージ専用の窓を持ち主にする。
   ブラウザ (スマホ) の本物のクリップボードには届かない (HTTP のページは `navigator.clipboard` を使えない)。noVNC の欄を介する
+- **noVNC 1.6.0 の「追加のキー」は幅 0 に潰れる**: 箱 (`#noVNC_modifiers`) は中身に合わせて幅が決まるのに、中のボタンに
+  `max-width: calc(100% - ...)` が付いていて、枠の丸が 6 つ縦に並ぶだけになる。配る `base.css` に `max-width: none` を足す。
+  JavaScript の `click()` は幅 0 でも押せるので、押す試験だけでは気づかない (ボタンの大きさも見る)
 - **Chromium (Edge のアプリ窓で確かめた。WebView2 の RepoTether は未確認)**: 画面の上なら、押す・打つ・大きさの変更が効いた。
   画面の外では描くのを止め、灰色が写り、ページの大きさも変わらなかった。起動時に
   `--disable-features=CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows` を付けると、画面の外でも効いた。

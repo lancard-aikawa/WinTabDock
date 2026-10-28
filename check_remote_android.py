@@ -266,6 +266,11 @@ def steps(dock: td.Dock) -> None:
         ck.check("URL に keylog を付けると、キーと入力欄の出来事、PC へ送ったキーが画面に出る",
                  "keydown key=\"Enter\"" in keylog and "send ド\n" in keylog and "send ド down" not in keylog,
                  keylog[-300:].replace("\n", " | "))
+        # 「追加のキー」の 6 つのボタンは、noVNC 1.6.0 のままだと幅 0 に潰れて枠の丸だけになる (下の click() は潰れていても押せる)
+        sizes = tab.js("[...document.querySelectorAll('#noVNC_modifiers .noVNC_button')]"
+                       ".map(e => e.offsetWidth + 'x' + e.offsetHeight).join(' ')")
+        ck.check("noVNC の「追加のキー」(Ctrl・Alt など 6 つ) が絵の見える大きさで出る",
+                 len(sizes.split()) == 6 and all(int(s.split("x")[0]) >= 24 for s in sizes.split()), sizes)
         # noVNC の帯の「Ctrl」(押したままにする切り替え) を入れてから s を打つ。入力欄の Ctrl+S (ツールの割り当て) が効く
         tab.js("document.getElementById('noVNC_toggle_ctrl_button').click()")
         time.sleep(0.3)

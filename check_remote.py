@@ -234,6 +234,8 @@ def steps(dock: td.Dock) -> None:
         kb = http_body("/core/input/keyboard.js")
         check("noVNC に手直しを当てて配る (iPad の日本語の入力中のキーを送らない)",
               "WinTabDock: keys typed while an IME composes" in kb, f"{len(kb)} 文字")
+        check("noVNC の「追加のキー」(Ctrl・Alt など) が幅 0 に潰れないよう手直しして配る",
+              "#noVNC_modifiers .noVNC_button {\n    max-width: none;" in http_body("/app/styles/base.css"))
         check("キーの記録 (URL に keylog) のスクリプトを読み込ませて配る",
               remote.KEYLOG_PATH in http_body("/vnc.html") and http_status("/" + remote.KEYLOG_PATH) == 200)
         bad = ["/\\\\127.0.0.1\\c$\\x", "/C:/Windows/win.ini", "/../remote.log", "/app/../../remote.log", "/%5C%5Cx"]
