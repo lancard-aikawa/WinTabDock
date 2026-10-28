@@ -271,6 +271,8 @@ uv run experiments/vnc_android_check.py                       # Android の実�
     (key・code・keyCode・isComposing)、composition、input (inputType・入力欄の末尾)、PC へ送ったキーを出す。配る vnc.html に
     読み込みを足し、URL に keylog が無ければ何もしない。手直しした keyboard.js を配ると remote.log に書く (ページを読み込み
     直したかが分かる)
+  - ユーザーが iPad のページを読み込み直したら直っていた (2026-10-28)。崩れたのは、開いたままのページが手直し前の
+    keyboard.js で動いていたため。exe を新しくしたら、ページを読み込み直してもらう (README に書いた)
 - **前に開いた noVNC のタブが古い合言葉でつなぎ直し続けると、新しいタブの接続が 20 秒以上待たされた。** 断られた接続が続くと、
   Chrome が同じ相手への WebSocket を待たせる。合言葉を作り直したら、古いタブは閉じる。試験は決め打ちで待たず、つながるまで待つ
 - 画面のキーボードを出すと、その分だけブラウザの中が狭くなる (画面写真では下の端がキーボードに隠れた)。大きさを頼み直すかは未確認
