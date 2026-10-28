@@ -85,7 +85,7 @@ uv run check_close.py PortWho RepoTether         # × を押したとき: 一緒
 「設定」の「スマホから使う」で入り切りする (入れたかは settings.json の `remote` に覚え、次の起動でも始める)。
 
 ```sh
-uv run check_remote.py           # ドックに試験用の窓を 3 つ取り込み、noVNC と同じ WebSocket でつなぐ。設定の画面と QR コード、つないでいる間の知らせの窓、表示倍率、絵文字・日本語の変換・カタカナ (Tk と、Tk でない EDIT の窓)、ツールが開くメニューと小窓、つないでいる間に開いた外のアプリの窓、Ctrl・Shift (Tk と EDIT)、クリップボードも 、「+ 開く」の一覧、最大化する窓、同じプロセスのもう 1 つの窓も (81 項目。人の WinTabDock が Wi-Fi で待ち受けていると 77)
+uv run check_remote.py           # ドックに試験用の窓を 3 つ取り込み、noVNC と同じ WebSocket でつなぐ。設定の画面と QR コード、つないでいる間の知らせの窓、表示倍率、絵文字・日本語の変換・カタカナ (Tk と、Tk でない EDIT の窓)、ツールが開くメニューと小窓、つないでいる間に開いた外のアプリの窓、Ctrl・Shift (Tk と EDIT)、クリップボードも 、「+ 開く」の一覧、最大化する窓、同じプロセスのもう 1 つの窓、HTTPS も (93 項目。人の WinTabDock が Wi-Fi で待ち受けていると 89)
 uv run check_remote_android.py   # Android の実機 (USB デバッグ) の Chrome から。メニューと小窓、iPad の日本語の入力の並び、キーの記録、noVNC の「Ctrl」とクリップボードの欄、「+ 開く」も (24 項目)
 uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi で PC のこのアドレスにつなぐ (USB は試験の操作だけ。25 項目)
 ```
@@ -110,6 +110,21 @@ uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi �
   New-NetFirewallRule -DisplayName "WinTabDock remote" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 15900 -Profile Private -Program "<exe の道>"
   ```
 - 家の Wi-Fi は暗号化されていない HTTP なので、同じ Wi-Fi の人には合言葉ごと見えうる。外から使うなら Tailscale (未確認)
+- **HTTPS (settings.json の `remote_https`。「スマホから使う」の画面の「通信を暗号化する」)。** 証明書は `tlscert.py` が
+  標準ライブラリだけで作る (ECDSA P-256 の計算と DER を手で書いた。exe に cryptography を入れないため。作るのに 0.05 秒)。
+  - 認証局 (CA) を 1 つ作って `tls/ca.pem`・`ca.key` に控え、スマホにはそれを一度だけ入れてもらう。待ち受けるアドレスの
+    証明書 (`server.pem`。アドレスと 127.0.0.1 入り、397 日) は、アドレスが含まれていないか 360 日を過ぎたら作り直す。
+    アドレスごとの証明書をそのまま信頼させると、ルーターがアドレスを変えるたびにスマホに入れ直しになる
+  - 認証局の鍵が漏れても銀行などの偽物を作れないよう、名前の制約 (critical) で 10/8・172.16/12・192.168/16・
+    100.64/10・127/8 と `wintabdock.invalid` にしか効かないようにした。DNS の名前の制約を 1 つも書かないと、
+    DNS の名前は何でも通る (制約は名前の種類ごとに効く) ので、使わない名前を 1 つ書いて閉じている。
+    OpenSSL で 8.8.8.8 の証明書が `permitted subtree violation` で落ちるのを確かめた。**スマホの側 (Chrome・iOS) が
+    制約を守るかは確かめていない**
+  - 同じポートで、最初の 1 バイトを覗いて (`MSG_PEEK`) 0x16 なら TLS、それ以外は平文の HTTP。平文では証明書の入れ方の
+    ページ (`/`) と証明書 (`/wintabdock-ca.crt`、DER) だけを配り、ほかは https へ 301 で回す。入れ方のページには合言葉を載せない
+  - TLS は `ssl.SSLSocket` でなく `MemoryBIO` で包み (`TlsConn`)、TLS の処理を 1 つの錠の中で行う。受けるスレッドと
+    画面を送るスレッドが同じ接続を使うが、OpenSSL の 1 つの接続を 2 つのスレッドから同時に触ってはいけない
+  - noVNC 1.6.0 は `navigator.clipboard` を使っていない。HTTPS にしても、クリップボードの欄を通す今の写し方は変わらない
 
 - `remote.py` は標準ライブラリだけで書く (exe に Pillow を入れていないので)。撮るのは `PrintWindow`、重ねて縮めるのは GDI の
   `StretchBlt`、送るのは変わった行の帯を zlib で縮めたもの (VNC の Zlib 符号。noVNC が読める)
@@ -125,7 +140,7 @@ uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi �
   読んだ) を出し、そこで試験ごと止まって見つかった。例外は記録 (remote.log) に書いて続ける
 - 試験 (`check_remote.py`) の Wi-Fi の項目は、人が使っている WinTabDock がそのアドレスのポートで待ち受けていたら飛ばす
   (ぶつかって待ち受けられず、試験が落ちた)
-- 入れるのは、URL の合言葉 (`?token=`。settings.json の `remote_token`) が合い、`Origin` が `http://<Host>` の WebSocket だけ。
+- 入れるのは、URL の合言葉 (`?token=`。settings.json の `remote_token`) が合い、`Origin` が `http://<Host>` (HTTPS のときは `https://<Host>`) の WebSocket だけ。
   トップのページ (/) は見せない。配るファイルの道は英数字と `. _ - /` だけ (`..` も断る)。ファイルに触れる前に確かめないと、
   `\\相手\共有` の道で相手の PC へつなぎに行き、サインインの資格情報 (NTLM) を渡しうる。
   「合言葉を作り直す」で前の URL を使えなくする。noVNC は初回に GitHub から取る (版とハッシュを固定)

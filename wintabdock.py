@@ -35,6 +35,7 @@ from pathlib import Path
 
 import qrcodegen  # QR コードを作る (Project Nayuki、MIT。1 ファイルを同梱)
 import remote
+import tlscert  # 遠隔の HTTPS の証明書を作る (標準ライブラリだけ)
 
 # ── Win32 ────────────────────────────────────────────────────────────────────
 
@@ -1027,8 +1028,9 @@ class Dock:
         def prepare() -> None:
             try:
                 web_root = remote.novnc_dir(STATE_DIR)
+                tls = remote.tls_setup(STATE_DIR / "tls", host) if self.prefs.get("remote_https") else None
                 view = remote.View(RemoteSource(self), self.remote_zoom)
-                server = remote.Server(view, host, port, token, web_root, self.remote_log)
+                server = remote.Server(view, host, port, token, web_root, self.remote_log, tls)
                 server.start()
             except OSError as e:
                 # 文字にしてから渡す (e は except を抜けると消えるので、あとで動く lambda からは読めない)
@@ -1036,7 +1038,7 @@ class Dock:
                 self.remote_log(msg.replace("\n", " "))
                 self.call_in_tk(lambda: self.remote_failed(msg), wait=False)
                 return
-            self.remote_log(f"待ち受けを始めた {host}:{port}")
+            self.remote_log(f"待ち受けを始めた {host}:{port}" + (" (HTTPS)" if tls else ""))
             self.call_in_tk(lambda: self._remote_started(server), wait=False)
 
         threading.Thread(target=prepare, daemon=True).start()
@@ -1086,6 +1088,13 @@ class Dock:
         if self.remote_server:
             self.restart_remote()
 
+    def set_remote_https(self, on: bool) -> None:
+        """通信を暗号化するか (スマホに証明書を一度入れてもらう)。待ち受けていればやり直す。"""
+        self.prefs["remote_https"] = on
+        self.save_prefs()
+        if self.remote_server:
+            self.restart_remote()
+
     def set_remote_network(self, name: str) -> None:
         """待ち受けるネットワークを選ぶ (name はネットワークの名前か "loopback")。待ち受けていればやり直す。"""
         self.prefs["remote_network"] = name
@@ -1114,9 +1123,14 @@ class Dock:
         tk.Button(bar, text="閉じる", width=10, command=win.destroy, **hand).pack(side=tk.RIGHT)
 
         # 右に QR コード (スマホのカメラで読めば URL をコピーして送らずに開ける)。出し入れで画面の大きさが変わらないよう幅を決めておく
-        qr_box = tk.Frame(win, width=260, height=310)
+        qr_box = tk.Frame(win, width=260, height=345)
         qr_box.pack_propagate(False)
         qr_box.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 12), pady=(10, 0))
+        qr_mode = tk.StringVar(value="connect")  # HTTPS のとき、QR を「つなぐ URL」と「証明書の入れ方」で切り替える
+        qr_tabs = tk.Frame(qr_box)
+        for value, text in (("connect", "つなぐ"), ("setup", "証明書を入れる")):
+            tk.Radiobutton(qr_tabs, text=text, value=value, variable=qr_mode, indicatoron=False, padx=8, pady=2,
+                           selectcolor="#ddd6fe", command=lambda: refresh(), **hand).pack(side=tk.LEFT, padx=2)
         qr_label = tk.Label(qr_box, bd=0)
         qr_label.pack(side=tk.TOP)
         qr_note = tk.Label(qr_box, justify=tk.CENTER, fg="#555555", wraplength=250)
@@ -1155,6 +1169,11 @@ class Dock:
                  fg="#555555").pack(fill=tk.X, pady=(6, 0))
         zoom_info = tk.Label(body, anchor=tk.W, fg="#555555")
         zoom_info.pack(fill=tk.X)
+        https_var = tk.BooleanVar(value=bool(self.prefs.get("remote_https")))
+        tk.Checkbutton(body, text="通信を暗号化する (HTTPS。スマホに証明書を一度入れる)", variable=https_var, anchor=tk.W,
+                       command=lambda: self.set_remote_https(https_var.get()), **hand).pack(fill=tk.X, pady=(8, 0))
+        https_info = tk.Label(body, anchor=tk.W, justify=tk.LEFT, fg="#555555", wraplength=440)
+        https_info.pack(fill=tk.X)
 
         net_var = tk.StringVar()
         shown: list = []  # 前に並べたアドレス (変わったときだけ並べ直す)
@@ -1206,22 +1225,41 @@ class Dock:
             elif remote.is_tailscale(host):
                 notes.append("Tailscale の中だけからつながります。通信は暗号化されます。")
             else:
-                notes.append("同じネットワーク (家の Wi-Fi など) からつながります。通信は暗号化されないので、"
-                             "同じ Wi-Fi の人には合言葉ごと見えることがあります。初めて待ち受けるとき、Windows の"
-                             "ファイアウォールの確認が出たら「プライベート ネットワーク」で許可してください。")
+                notes.append("同じネットワーク (家の Wi-Fi など) からつながります。" +
+                             ("通信は HTTPS で暗号化します。" if https_var.get() else
+                              "通信は暗号化されないので、同じ Wi-Fi の人には合言葉ごと見えることがあります"
+                              " (下の「通信を暗号化する」で防げます)。") +
+                             "初めて待ち受けるとき、Windows のファイアウォールの確認が出たら「プライベート ネットワーク」で"
+                             "許可してください。")
             hint.config(text="\n".join(notes))
+            tls = self.remote_server.tls if self.remote_server else None
+            if tls:
+                https_info.config(text="初めてのスマホには、右の「証明書を入れる」の QR から証明書を入れてください。"
+                                       f"\n証明書の指紋 (SHA-256): {tlscert.fingerprint(tls[1])}")
+            elif https_var.get():
+                https_info.config(text="待ち受けを始めると、証明書を作ります。")
+            else:
+                https_info.config(text="")
+            if tls and host != "127.0.0.1":
+                qr_tabs.pack(side=tk.TOP, before=qr_label, pady=(0, 6))
+            else:
+                qr_tabs.pack_forget()
+                qr_mode.set("connect")
             zoom_info.config(text=f"スマホでの表示倍率 {round(self.remote_zoom * 100)}% "
                                   "(スマホで、タブの帯の「− 縮小」「+ 拡大」で変える)")
             on = self.remote_server is not None
             url_var.set(self.remote_server.url.replace(self.remote_server.token, "********") if on else "(待ち受けていません)")
             copy.config(state=tk.NORMAL if on else tk.DISABLED)
             renew.config(state=tk.NORMAL if on else tk.DISABLED)
-            want = self.remote_server.url if on and host != "127.0.0.1" else ""
+            setup = qr_mode.get() == "setup"
+            want = "" if not on or host == "127.0.0.1" else \
+                self.remote_server.setup_url if setup else self.remote_server.url
             if want != qr_shown[0]:
                 qr_shown[0] = want
                 qr_label.image = qr_photo(want) if want else None  # 画像は手元で持っておかないと消える
                 qr_label.config(image=qr_label.image or "")
-            qr_note.config(text="スマホのカメラで読むと開きます。\n合言葉が入っているので、人に見せないでください" if want else
+            qr_note.config(text="証明書の入れ方のページが開きます。\n入れたら「つなぐ」の QR を読んでください" if want and setup else
+                           "スマホのカメラで読むと開きます。\n合言葉が入っているので、人に見せないでください" if want else
                            "この PC だけで待ち受けているので、\nQR コードは出しません" if on else
                            "待ち受けを始めると、\nここに QR コードが出ます")
             win.after(1000, refresh)

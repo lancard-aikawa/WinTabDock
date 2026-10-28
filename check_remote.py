@@ -20,6 +20,7 @@ import ctypes.wintypes
 import json
 import os
 import socket
+import ssl
 import struct
 import sys
 import tempfile
@@ -80,9 +81,12 @@ def http_body(path: str) -> str:
 class Client:
     """noVNC と同じく WebSocket でつなぐ最小の VNC クライアント (Zlib と Raw を読む)。"""
 
-    def __init__(self, token: str):
-        self.ws = websocket.create_connection(f"ws://127.0.0.1:{PORT}/websockify?token={token}",
-                                              origin=f"http://127.0.0.1:{PORT}", subprotocols=["binary"], timeout=10)
+    def __init__(self, token: str, ca: Path | None = None):
+        """ca を渡すと HTTPS (wss) でつなぎ、その認証局の証明書だけを信頼する。"""
+        ws, http = ("wss", "https") if ca else ("ws", "http")
+        self.ws = websocket.create_connection(f"{ws}://127.0.0.1:{PORT}/websockify?token={token}",
+                                              origin=f"{http}://127.0.0.1:{PORT}", subprotocols=["binary"], timeout=10,
+                                              sslopt={"ca_certs": str(ca)} if ca else None)
         self.buf = bytearray()
         self.inflate = zlib.decompressobj()
         assert self.recv(12) == b"RFB 003.008\n"
@@ -456,6 +460,7 @@ def steps(dock: td.Dock) -> None:
               f"待ち受け {dock.remote_server} ドック {now} 知らせ {notice_state(dock)}")
         c.close()
         c = None
+        https_steps(dock, token, h1)
     except Exception:
         traceback.print_exc()
         check("途中で止まらない", False)
@@ -467,6 +472,133 @@ def steps(dock: td.Dock) -> None:
         ck.close_apps([(app1, h1), (app2, h2), edit_app] + apps)
         dock.call_in_tk(dock.stop_remote)
         dock.call_in_tk(dock.quit, wait=False)
+
+
+def tls_get(path: str, ca: Path | None) -> tuple[int, bytes]:
+    """HTTPS で GET する。ca が None なら、どの認証局も信頼しない (スマホが証明書を入れていないのと同じ)。"""
+    ctx = ssl.create_default_context(cafile=str(ca)) if ca else ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    with socket.create_connection(("127.0.0.1", PORT), timeout=5) as raw:
+        with ctx.wrap_socket(raw, server_hostname="127.0.0.1") as s:
+            s.sendall(f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{PORT}\r\n\r\n".encode())
+            data = b""
+            while chunk := s.recv(65536):
+                data += chunk
+    return int(data.split(b" ")[1]), data.split(b"\r\n\r\n", 1)[1]
+
+
+def plain_get(path: str) -> tuple[bytes, bytes]:
+    """平文で GET する。(ヘッダ, 中身)"""
+    with socket.create_connection(("127.0.0.1", PORT), timeout=5) as s:
+        s.sendall(f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{PORT}\r\n\r\n".encode())
+        data = b""
+        while chunk := s.recv(65536):
+            data += chunk
+    head, _, body = data.partition(b"\r\n\r\n")
+    return head, body
+
+
+def https_steps(dock: td.Dock, token: str, h1: int) -> None:
+    """通信を暗号化する (HTTPS)。証明書は自分で作り、平文で来たら証明書の入れ方のページだけを見せる。"""
+    import tlscert
+    dock.call_in_tk(lambda: dock.set_remote_https(True))
+    dock.call_in_tk(dock.start_remote)
+    for _ in range(100):
+        if dock.remote_server:
+            break
+        time.sleep(0.1)
+    server = dock.remote_server
+    check("HTTPS にすると、URL が https になる", bool(server) and server.url.startswith(f"https://127.0.0.1:{PORT}/"),
+          server.url.replace(token, "<合言葉>") if server else "待ち受けていない")
+    if not server:
+        return
+    ca_file = HOME / "tls" / "ca.pem"
+    ca = ca_file.read_text(encoding="ascii")
+    fp = tlscert.fingerprint(ca)
+    status, page = tls_get("/vnc.html", ca_file)
+    check("作った認証局を信頼すれば、HTTPS で noVNC のページが届く", status == 200 and b"noVNC" in page, str(status))
+    check("HTTPS でも、トップのページ (/) は見せない", tls_get("/", ca_file)[0] == 404)
+    try:
+        tls_get("/vnc.html", None)
+        refused = False
+    except ssl.SSLCertVerificationError:
+        refused = True
+    check("認証局を信頼していなければ、つながらない (証明書の確かめが効いている)", refused)
+    head, body = plain_get("/")
+    check("平文で来たら、証明書の入れ方のページを見せる (指紋入り、合言葉は載せない)",
+          b"200 OK" in head and fp.encode() in body and token.encode() not in body, head.split(b"\r\n")[0].decode())
+    head, body = plain_get("/" + remote.CA_PATH)
+    check("平文で証明書 (DER) を配る", b"application/x-x509-ca-cert" in head and body == tlscert.der(ca),
+          f"{len(body)} バイト")
+    head, _ = plain_get(f"/vnc.html?token={token}")
+    check("平文の noVNC の URL は https へ回す (前の URL を開いたとき)",
+          b"301" in head.split(b"\r\n")[0] and f"Location: https://127.0.0.1:{PORT}/vnc.html?token=".encode() in head,
+          head.split(b"\r\n")[0].decode())
+    check("HTTPS の WebSocket に http の Origin で来たら断る", tls_ws_status(token, "http", ca_file) == 403)
+
+    dock.call_in_tk(lambda: dock.select(next(t for t in dock.tabs if t.hwnd == h1)))
+    c = Client(token, ca_file)
+    try:
+        c.set_size(411, 772)
+        c.full_frame()
+        _, tx, ty, _, _ = RemoteSource_layers(dock)[1]
+        c.tap(tx + 210, ty + 190)
+        time.sleep(0.3)
+        before = td.window_title(h1)
+        # 画面を送るスレッドと受けるスレッドが同じ TLS の接続を使う。画面を頼み続けながら打って、両方が通るか
+        stop = threading.Event()
+        frames = [0]
+
+        def type_keys() -> None:
+            for ks in (ord("t"), ord("l"), ord("s"), 0x01003042):  # t l s あ
+                c.key(ks)
+                time.sleep(0.05)
+            stop.set()
+
+        threading.Thread(target=type_keys, daemon=True).start()
+        end = time.monotonic() + 3
+        while time.monotonic() < end and not (stop.is_set() and frames[0] >= 5):
+            c.send(struct.pack(">BBHHHH", 3, 0, 0, 0, *c.fb.size))
+            c.read_update()
+            frames[0] += 1
+        title = ck.wait_title(h1, "tlsあ")
+        check("HTTPS でつなぎ、画面を受けながら打てる", "tlsあ" in title, f"{before} → {title} 画面 {frames[0]} 回")
+    finally:
+        c.close()
+
+    dock.call_in_tk(dock.restart_remote)
+    for _ in range(100):
+        if dock.remote_server and dock.remote_server is not server:
+            break
+        time.sleep(0.1)
+    check("待ち受けをやり直しても、同じ認証局を使う (スマホに入れ直さずに済む)",
+          dock.remote_server is not None and tlscert.fingerprint(dock.remote_server.tls[1]) == fp)
+    dock.call_in_tk(dock.show_remote_panel)
+    time.sleep(1.2)
+    texts = tk_get(dock, lambda: widget_texts(dock._remote_panel))
+    shot(dock, "remote-5-panel-https.png")
+    check("「スマホから使う」の画面に、証明書の指紋が出る", any(fp in t for t in texts))
+    dock.call_in_tk(dock._remote_panel.destroy)
+
+    # アドレスが変わったら、待ち受けるアドレスの証明書だけを作り直す (認証局は同じ)
+    folder = HOME / "tls-move"
+    remote.tls_setup(folder, "192.168.10.5")
+    ca1 = (folder / "ca.pem").read_text(encoding="ascii")
+    remote.tls_setup(folder, "100.80.1.2")
+    ips = (folder / "server.ips").read_text(encoding="ascii")
+    check("アドレスが変わると、そのアドレスの証明書を作り直す (認証局は変えない)",
+          (folder / "ca.pem").read_text(encoding="ascii") == ca1 and ips.split()[0] == "100.80.1.2", ips)
+    dock.call_in_tk(dock.stop_remote)
+    dock.call_in_tk(lambda: dock.set_remote_https(False))
+
+
+def tls_ws_status(token: str, scheme: str, ca: Path) -> int:
+    ctx = ssl.create_default_context(cafile=str(ca))
+    with socket.create_connection(("127.0.0.1", PORT), timeout=5) as raw:
+        with ctx.wrap_socket(raw, server_hostname="127.0.0.1") as s:
+            s.sendall(f"GET /websockify?token={token} HTTP/1.1\r\nHost: 127.0.0.1:{PORT}\r\n"
+                      f"Origin: {scheme}://127.0.0.1:{PORT}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                      "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n".encode())
+            return int(s.recv(64).split(b" ")[1])
 
 
 def launch_steps(dock: td.Dock, c: Client, apps: list) -> None:
@@ -707,7 +839,8 @@ def all_widgets(w) -> list:
 
 
 def radio_buttons(w) -> list:
-    return [x for x in all_widgets(w) if isinstance(x, td.tk.Radiobutton)]
+    """待ち受けるアドレスの選択肢 (QR の「つなぐ」「証明書を入れる」の切り替えは除く)。"""
+    return [x for x in all_widgets(w) if isinstance(x, td.tk.Radiobutton) and x.cget("value") not in ("connect", "setup")]
 
 
 def widget_texts(w) -> list[str]:

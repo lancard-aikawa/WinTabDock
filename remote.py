@@ -22,6 +22,7 @@ import queue
 import re
 import secrets
 import socket
+import ssl
 import struct
 import tarfile
 import threading
@@ -1395,14 +1396,147 @@ def tailscale_ip() -> str | None:
     return None
 
 
+# ── HTTPS ────────────────────────────────────────────────────────────────────
+
+CA_PATH = "wintabdock-ca.crt"  # 平文の HTTP で配る認証局の証明書 (スマホに入れてもらう)
+
+
+class TlsConn:
+    """TLS の接続。受けるスレッドと送るスレッドが同時に使うので、ssl のソケットでなく MemoryBIO で包み、
+    TLS の処理は 1 つの錠の中で行う (OpenSSL の 1 つの接続を 2 つのスレッドから同時に触ると壊れうる)。"""
+
+    def __init__(self, raw: socket.socket, ctx: ssl.SSLContext):
+        self.raw = raw
+        self.inc, self.out = ssl.MemoryBIO(), ssl.MemoryBIO()
+        self.obj = ctx.wrap_bio(self.inc, self.out, server_side=True)
+        self.lock = threading.Lock()
+        while True:
+            with self.lock:
+                try:
+                    self.obj.do_handshake()
+                    self._flush()
+                    return
+                except ssl.SSLWantReadError:
+                    self._flush()
+            if not self._feed():
+                raise Closed()
+
+    def _flush(self) -> None:  # 錠の中で呼ぶ
+        data = self.out.read()
+        if data:
+            self.raw.sendall(data)
+
+    def _feed(self) -> bool:
+        data = self.raw.recv(16384)
+        if not data:
+            return False
+        with self.lock:
+            self.inc.write(data)
+        return True
+
+    def recv(self, n: int) -> bytes:
+        while True:
+            with self.lock:
+                try:
+                    data = self.obj.read(n)
+                    self._flush()
+                    return data
+                except ssl.SSLWantReadError:
+                    self._flush()
+                except (ssl.SSLZeroReturnError, ssl.SSLEOFError):
+                    return b""
+            if not self._feed():
+                return b""
+
+    def sendall(self, data: bytes) -> None:
+        with self.lock:
+            self.obj.write(data)
+            self._flush()
+
+    def settimeout(self, t: float | None) -> None:
+        self.raw.settimeout(t)
+
+    def close(self) -> None:
+        self.raw.close()
+
+
+def tls_setup(folder: Path, host: str) -> tuple[ssl.SSLContext, str]:
+    """HTTPS の (SSLContext, 認証局の証明書の PEM)。認証局は初回に作って控え、待ち受けるアドレスの証明書は
+    アドレスが含まれていないか、期限が 30 日を切っていたら作り直す (スマホに入れ直さずに済む)。"""
+    import tlscert
+    folder.mkdir(parents=True, exist_ok=True)
+    ca_file, ca_key = folder / "ca.pem", folder / "ca.key"
+    if not (ca_file.exists() and ca_key.exists()):
+        ca, key = tlscert.make_ca(f"WinTabDock {socket.gethostname()}")
+        ca_key.write_text(key, encoding="ascii")
+        ca_file.write_text(ca, encoding="ascii")
+    ca = ca_file.read_text(encoding="ascii")
+    ips = ([ip for _, ip in local_addresses()] if host in ("0.0.0.0", "") else [host]) + ["127.0.0.1"]
+    ips = [ip for i, ip in enumerate(ips) if ip not in ips[:i]]
+    srv_file, srv_key, srv_ips = folder / "server.pem", folder / "server.key", folder / "server.ips"
+    fresh = False
+    if srv_file.exists() and srv_key.exists() and srv_ips.exists():
+        fresh = (set(ips) <= set(srv_ips.read_text(encoding="ascii").split())
+                 and srv_file.stat().st_mtime > time.time() - 360 * 86400)  # 397 日で切れる
+    if not fresh:
+        cert, key = tlscert.make_server(ca, ca_key.read_text(encoding="ascii"), ips)
+        srv_key.write_text(key, encoding="ascii")
+        srv_file.write_text(cert, encoding="ascii")
+        srv_ips.write_text(" ".join(ips), encoding="ascii")
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.load_cert_chain(srv_file, srv_key)
+    return ctx, ca
+
+
+def setup_page(ca_pem: str) -> bytes:
+    """平文の HTTP の / に出す、証明書の入れ方のページ (合言葉は載せない)。"""
+    import tlscert
+    fp = tlscert.fingerprint(ca_pem)
+    return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>WinTabDock の証明書</title>
+<style>
+body {{ font-family: sans-serif; margin: 0 auto; padding: 16px; max-width: 640px; line-height: 1.6;
+       background: #ffffff; color: #1f2937; }}
+h1 {{ font-size: 1.3em; }} h2 {{ font-size: 1.05em; margin-top: 1.6em; }}
+a.button {{ display: inline-block; padding: 12px 20px; background: #6d28d9; color: #ffffff; border-radius: 6px;
+           text-decoration: none; font-weight: bold; border: 1px solid #4c1d95; cursor: pointer; }}
+a.button:hover, a.button:focus {{ background: #5b21b6; }} a.button:active {{ background: #4c1d95; }}
+code {{ word-break: break-all; font-size: 0.85em; background: #f3f4f6; padding: 2px 4px; }}
+</style></head><body translate="no" class="notranslate">
+<h1>WinTabDock の証明書を入れる</h1>
+<p>通信を暗号化 (HTTPS) するために、この PC の WinTabDock の証明書を、スマホに一度だけ入れます。</p>
+<p><a class="button" href="/{CA_PATH}">証明書をダウンロード</a></p>
+<p>指紋 (SHA-256。PC の「スマホから使う」の画面に出る値と同じか確かめる):<br><code>{fp}</code></p>
+<h2>iPhone・iPad</h2>
+<ol>
+<li>上のボタンを押し、「許可」を押す (Safari で開く)</li>
+<li>「設定」→「一般」→「VPN とデバイス管理」で、ダウンロードしたプロファイルを選び「インストール」</li>
+<li>「設定」→「一般」→「情報」→「証明書信頼設定」で、「WinTabDock …」をオンにする</li>
+</ol>
+<h2>Android</h2>
+<ol>
+<li>上のボタンを押して保存する</li>
+<li>「設定」→「セキュリティとプライバシー」→「その他のセキュリティ設定」→「暗号化と認証情報」→
+「証明書のインストール」→「CA 証明書」で、保存したファイルを選ぶ (機種で名前が少し違う)</li>
+</ol>
+<p>入れたら、PC の画面の QR コードを読み直してください。</p>
+<p>この証明書は、家の中と Tailscale のアドレスにだけ効くように作ってあります (ふつうのサイトには使えません)。
+要らなくなったら、同じ設定の画面から消せます。</p>
+</body></html>
+""".encode("utf-8")
+
+
 class Server:
-    """待ち受け。ブラウザに noVNC を配り、合言葉の合う WebSocket だけを VNC の接続にする。"""
+    """待ち受け。ブラウザに noVNC を配り、合言葉の合う WebSocket だけを VNC の接続にする。
+    tls を渡すと HTTPS で配る。同じポートに平文で来たら、証明書の入れ方のページと証明書だけを見せる。"""
 
     def __init__(self, view: View, host: str, port: int, token: str, web_root: Path,
-                 log: Callable[[str], None] = print):
+                 log: Callable[[str], None] = print, tls: tuple[ssl.SSLContext, str] | None = None):
         self.view = view
         self.host, self.port, self.token = host, port, token
         self.web_root = web_root
+        self.tls = tls  # (SSLContext, 認証局の証明書の PEM)
         self.log = log
         self.sessions: list[Session] = []
         self.lock = threading.Lock()
@@ -1413,7 +1547,16 @@ class Server:
     @property
     def url(self) -> str:
         path = urllib.parse.quote(f"websockify?token={self.token}", safe="")
-        return f"http://{self.host}:{self.port}/vnc.html?autoconnect=true&resize=remote&reconnect=true&path={path}"
+        return f"{self.scheme}://{self.host}:{self.port}/vnc.html?autoconnect=true&resize=remote&reconnect=true&path={path}"
+
+    @property
+    def scheme(self) -> str:
+        return "https" if self.tls else "http"
+
+    @property
+    def setup_url(self) -> str:
+        """証明書の入れ方のページ (平文の HTTP。合言葉は入らない)。"""
+        return f"http://{self.host}:{self.port}/"
 
     def peers(self) -> list[str]:
         """いまつないでいる相手のアドレス。"""
@@ -1488,6 +1631,17 @@ class Server:
         try:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             sock.settimeout(10)
+            plain = False
+            if self.tls:
+                first = sock.recv(1, socket.MSG_PEEK)
+                if first == b"\x16":  # TLS の ClientHello (平文の HTTP は "GET ")
+                    try:
+                        sock = TlsConn(sock, self.tls[0])
+                    except ssl.SSLError as e:
+                        self.log(f"{addr[0]}: TLS でつなげなかった (スマホが証明書を信頼していないかも): {e.reason}")
+                        return
+                else:
+                    plain = True
             head = b""
             while b"\r\n\r\n" not in head:
                 chunk = sock.recv(4096)
@@ -1501,7 +1655,9 @@ class Server:
             headers = {k.strip().lower(): v.strip() for k, _, v in (ln.partition(":") for ln in lines[1:])}
             if method != "GET":
                 return
-            if headers.get("upgrade", "").lower() == "websocket":
+            if plain:
+                self._plain(sock, target, headers)
+            elif headers.get("upgrade", "").lower() == "websocket":
                 self._websocket(sock, addr, path, query, headers)
             else:
                 self._static(sock, path)
@@ -1516,7 +1672,7 @@ class Server:
         token = urllib.parse.parse_qs(query).get("token", [""])[0]
         host = headers.get("host", "").lower()
         ok_token = secrets.compare_digest(token.encode(), self.token.encode())
-        if path != "/websockify" or not ok_token or headers.get("origin", "").lower() != f"http://{host}":
+        if path != "/websockify" or not ok_token or headers.get("origin", "").lower() != f"{self.scheme}://{host}":
             self.log(f"{addr[0]}: 断った ({'合言葉が違う' if not ok_token else 'Origin が違う'})")
             sock.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             return
@@ -1541,6 +1697,23 @@ class Server:
                 self.view.requested = None
                 self.view.input.release_keys()
                 self.view.source.connected(False)
+
+    def _plain(self, sock: socket.socket, target: str, headers: dict) -> None:
+        """HTTPS にしているときに平文で来た。証明書の入れ方のページと証明書だけを配り、ほかは HTTPS へ回す。"""
+        path = target.partition("?")[0]
+        if path == "/":
+            body, ctype, extra = setup_page(self.tls[1]), "text/html; charset=utf-8", ""
+        elif path == "/" + CA_PATH:
+            import tlscert
+            body, ctype = tlscert.der(self.tls[1]), "application/x-x509-ca-cert"
+            extra = f"Content-Disposition: attachment; filename=\"{CA_PATH}\"\r\n"
+        else:
+            host = headers.get("host", f"{self.host}:{self.port}")
+            sock.sendall(f"HTTP/1.1 301 Moved Permanently\r\nLocation: https://{host}{target}\r\n"
+                         "Content-Length: 0\r\nConnection: close\r\n\r\n".encode("latin-1", "replace"))
+            return
+        sock.sendall(f"HTTP/1.1 200 OK\r\nContent-Length: {len(body)}\r\nContent-Type: {ctype}\r\n{extra}"
+                     "Cache-Control: no-cache\r\nConnection: close\r\n\r\n".encode() + body)
 
     def _static(self, sock: socket.socket, path: str) -> None:
         if path == "/":
