@@ -521,6 +521,17 @@ class WindowInput:
             if not mask & 7:
                 self.blocked = False
             return
+        if pressing == 1 and not self.buttons & 7:
+            tab = tab_at(child, cx, cy)
+            if tab is not None:
+                # タブの帯は、押す知らせを送らずにタブを選ばせる。Mery のタブの帯は押すとタブを引きずる用意をして
+                # マウスをつかむ (隠れた窓 TPUtilWindow がキャプチャを持つ)。離した位置は本物のマウスの位置 (PC の
+                # 画面のどこか、Mery の外) で見るので、どう終わらせてもタブが外へ引き出されて別の窓になり、
+                # 終わらせなければ、つかんだままでほかのタブも押せなくなった (2026-10-29)
+                _u.SendMessageTimeoutW(child, TCM_SETCURFOCUS, tab, 0, SMTO_ABORTIFHUNG, SEND_TIMEOUT_MS, None)
+                input_log(f"tab {tab} of {child}")
+                self.blocked = True  # 離すまで何も送らない
+                return
         mk = sum(BUTTON_MSGS[b][2] for b in BUTTON_MSGS if mask & b)
         mk |= (0x0004 if 0x10 in self.mod_vks() else 0) | (0x0008 if 0x11 in self.mod_vks() else 0)  # MK_SHIFT・MK_CONTROL
         msgs = [(WM_MOUSEMOVE, mk, lparam_xy(cx, cy))]
@@ -811,6 +822,53 @@ def child_at(hwnd: int, x: int, y: int) -> tuple[int, int, int]:
             return hwnd, pt.x, pt.y
         _u.MapWindowPoints(hwnd, child, ctypes.byref(pt), 1)
         hwnd = child
+
+
+TCM_GETITEMCOUNT, TCM_HITTEST, TCM_SETCURFOCUS = 0x1304, 0x130D, 0x1330
+kernel32.OpenProcess.restype = wintypes.HANDLE
+kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+kernel32.VirtualAllocEx.restype = ctypes.c_void_p
+kernel32.VirtualAllocEx.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_size_t, wintypes.DWORD, wintypes.DWORD]
+kernel32.VirtualFreeEx.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_size_t, wintypes.DWORD]
+kernel32.WriteProcessMemory.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t,
+                                        ctypes.c_void_p]
+kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+
+def tab_at(hwnd: int, x: int, y: int) -> int | None:
+    """hwnd が Windows のタブの帯 (SysTabControl32。Delphi の TPageControl も中身はそれ) なら、(x, y) にあるタブの番号。
+    タブの帯でないか、タブの無い所なら None。名前で絞ってから聞く (タブの帯でない窓に TCM_ を送らないため)"""
+    name = ctypes.create_unicode_buffer(64)
+    _u.GetClassNameW(hwnd, name, 64)
+    if not any(k in name.value for k in ("Tab", "PageControl")):
+        return None
+    res = ctypes.c_size_t()
+    if not _u.SendMessageTimeoutW(hwnd, TCM_GETITEMCOUNT, 0, 0, SMTO_ABORTIFHUNG, SEND_TIMEOUT_MS, ctypes.byref(res)) \
+            or not 0 < res.value < 10000:
+        return None
+    # 当たりの調べ (TCM_HITTEST) は座標を相手のプロセスの中に置いて渡す
+    pid = wintypes.DWORD()
+    _u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    proc = kernel32.OpenProcess(0x0008 | 0x0020, False, pid.value)  # VM_OPERATION | VM_WRITE
+    if not proc:
+        return None
+    try:
+        mem = kernel32.VirtualAllocEx(proc, None, 16, 0x3000, 0x04)  # MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE
+        if not mem:
+            return None
+        try:
+            info = (ctypes.c_long * 3)(x, y, 0)  # TCHITTESTINFO { POINT pt; UINT flags }
+            if not kernel32.WriteProcessMemory(proc, mem, info, ctypes.sizeof(info), None):
+                return None
+            if not _u.SendMessageTimeoutW(hwnd, TCM_HITTEST, 0, mem, SMTO_ABORTIFHUNG, SEND_TIMEOUT_MS,
+                                          ctypes.byref(res)):
+                return None
+        finally:
+            kernel32.VirtualFreeEx(proc, mem, 0, 0x8000)  # MEM_RELEASE
+    finally:
+        kernel32.CloseHandle(proc)
+    idx = ctypes.c_ssize_t(res.value).value
+    return idx if idx >= 0 else None
 
 
 def focus_of(hwnd: int) -> int:

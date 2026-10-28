@@ -426,6 +426,7 @@ def steps(dock: td.Dock) -> None:
         launch_steps(dock, c, apps)
         maximize_steps(dock, apps)
         second_window_steps(dock, apps)
+        tab_strip_steps(dock, c, apps)
 
         c.close()
         c = None
@@ -859,6 +860,70 @@ def start_edit_app(tag: str):
             return proc, found[0]
         time.sleep(0.1)
     raise RuntimeError(f"{title} の窓が出ない")
+
+
+def tab_item_rect(tabs: int, i: int) -> tuple[int, int, int, int]:
+    """タブの帯の i 番目のタブの位置 (帯の中の座標)。TCM_GETITEMRECT は相手のプロセスの中に置いた RECT に書く。"""
+    k32 = ctypes.WinDLL("kernel32")  # 自前の口 (引数の型を変えるので、ほかと共有しない)
+    k32.OpenProcess.restype = ctypes.c_void_p
+    k32.VirtualAllocEx.restype = ctypes.c_void_p
+    k32.VirtualAllocEx.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_ulong, ctypes.c_ulong]
+    k32.ReadProcessMemory.argtypes = [ctypes.c_void_p] * 3 + [ctypes.c_size_t, ctypes.c_void_p]
+    k32.VirtualFreeEx.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_ulong]
+    proc = k32.OpenProcess(0x0008 | 0x0010 | 0x0020, False, td.window_pid(tabs))
+    mem = k32.VirtualAllocEx(proc, None, 16, 0x3000, 0x04)
+    td.user32.SendMessageW(tabs, 0x130A, i, ctypes.c_ssize_t(mem))  # TCM_GETITEMRECT
+    rect = (ctypes.c_long * 4)()
+    k32.ReadProcessMemory(proc, mem, rect, 16, None)
+    k32.VirtualFreeEx(proc, mem, 0, 0x8000)
+    k32.CloseHandle(ctypes.c_void_p(proc))
+    return tuple(rect)
+
+
+def tab_strip_steps(dock: td.Dock, c, apps: list) -> None:
+    """Mery のタブの帯は、押すとタブを選んでから、引きずる用意で隠れた窓にマウスをつかませる。遠隔からタブを押すと
+    つかんだままになり、離した位置を本物のマウス (Mery の外) で見て、タブが外へ引き出されて別の窓になった
+    (スマホで Mery の別のタブへ移ろうとしたら、窓が 2 つに分かれた。2026-10-29)。タブの帯は、押す知らせを送らずに
+    タブを選ばせる"""
+    tag = f"r{os.getpid()}t"
+    os.environ["EDIT_TESTAPP_TABS"] = "1"
+    try:
+        app = start_edit_app(tag)
+    finally:
+        del os.environ["EDIT_TESTAPP_TABS"]
+    apps.append(app)
+    he = app[1]
+    for _ in range(50):
+        if dock.active and dock.active.hwnd == he:
+            break
+        time.sleep(0.1)
+    time.sleep(0.5)
+    tabs = next(h for h in child_windows(he) if window_class(h) == "SysTabControl32")
+    results = []
+    for want in (1, 2, 0):
+        layer = next((lay for lay in RemoteSource_layers(dock) if lay[0] == he), None)
+        if not layer:  # 引き出された窓がタブになって選ばれ、試験用の窓が遠隔の画面から外れた (直す前)
+            results.append((want, "写っていない", "-", "-"))
+            break
+        r = tab_item_rect(tabs, want)
+        bx, by = td.rect_of(tabs)[:2]
+        ox, oy = remote.client_origin(he)
+        c.tap(layer[1] + bx - ox + (r[0] + r[2]) // 2, layer[2] + by - oy + (r[1] + r[3]) // 2)
+        time.sleep(0.8)
+        info = remote.GUITHREADINFO(cbSize=ctypes.sizeof(remote.GUITHREADINFO))
+        td.user32.GetGUIThreadInfo(td.user32.GetWindowThreadProcessId(he, None), ctypes.byref(info))
+        torn = [h for h in all_windows() if td.window_title(h) == f"edit-testapp {tag} torn"]
+        results.append((want, td.user32.SendMessageW(tabs, 0x130B, 0, 0), info.hwndCapture or 0, len(torn)))
+    torn = [h for h in all_windows() if td.window_title(h) == f"edit-testapp {tag} torn"]
+    check("ツールのタブの帯 (Mery の文書のタブ) を押すと、そのタブに切り替わり、マウスをつかんだままにならず、"
+          "タブが外へ引き出されて別の窓にならない",
+          len(results) == 3 and all(cur == want and not cap and not n for want, cur, cap, n in results) and not torn,
+          f"(狙い, 選ばれた, つかんでいる窓, 引き出された窓) {results} 引き出された窓 {torn}")
+    for h in torn:  # 直す前に引き出された窓は、ここで閉じる (タブになっていれば外してから)
+        t = next((t for t in dock.tabs if t.hwnd == h), None)
+        if t:
+            dock.call_in_tk(lambda t=t: dock.release(t))
+        td.user32.PostMessageW(h, 0x0010, 0, 0)  # WM_CLOSE
 
 
 def edit_steps(dock: td.Dock, c, edit_app) -> None:

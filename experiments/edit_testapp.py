@@ -8,9 +8,13 @@
 Ctrl+S は、Mery などと同じくショートカットの表 (TranslateAccelerator) で受けて、"[S]" を足す。
 「検索...」は、Mery の検索と同じく、この窓が持ち主の小窓 (タイトル "edit-testapp-find"、中に EDIT) を、画面の中に
 収めて出す (この窓が画面の外にあれば、画面の右端へ寄せる)
+環境変数 EDIT_TESTAPP_TABS があれば、下に Windows のタブの帯 (SysTabControl32、タブ 3 つ) を置く。Mery のタブの帯と
+同じく、押すとタブを選んでから、隠れた窓にマウスをつかませる (引きずる用意)。つかむのが終わると、タブを外へ引き出した
+ことにして、新しい窓 (タイトル "edit-testapp <目印> torn") を開く
 """
 
 import ctypes
+import os
 import sys
 from ctypes import wintypes
 
@@ -96,15 +100,68 @@ def open_find(top: int, inst: int) -> None:
     u.SetFocus(box)
 
 
+TAB_H = 30
+TCM_INSERTITEMW = 0x133E
+u.SetWindowLongPtrW.restype = ctypes.c_void_p
+u.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+u.CallWindowProcW.restype = LRESULT
+u.CallWindowProcW.argtypes = [ctypes.c_void_p, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+u.SetCapture.argtypes = [wintypes.HWND]
+
+
+class TCITEMW(ctypes.Structure):
+    _fields_ = [("mask", wintypes.UINT), ("dwState", wintypes.DWORD), ("dwStateMask", wintypes.DWORD),
+                ("pszText", wintypes.LPWSTR), ("cchTextMax", ctypes.c_int), ("iImage", ctypes.c_int),
+                ("lParam", wintypes.LPARAM)]
+
+
+def make_tabs(top: int, inst: int, tag: str) -> tuple[int, list]:
+    """Mery のタブの帯の代わり (上の説明)。返すのは (タブの帯, 手放さずに持っておく物)。"""
+    ctypes.windll.comctl32.InitCommonControls()
+    tabs = u.CreateWindowExW(0, "SysTabControl32", "", WS_CHILD | WS_VISIBLE, 0, 0, 480, TAB_H, top, None, inst, None)
+    for i, name in enumerate(("文書 1", "文書 2", "文書 3")):
+        item = TCITEMW(mask=1, pszText=name)  # TCIF_TEXT
+        u.SendMessageW(tabs, TCM_INSERTITEMW, i, ctypes.addressof(item))
+
+    def drag_proc(h, m, w, lp):
+        if m in (0x0202, 0x0215):  # WM_LBUTTONUP・WM_CAPTURECHANGED: 引きずり終わり。外へ引き出したことにする
+            if m == 0x0202:
+                u.ReleaseCapture()
+            u.CreateWindowExW(0, "EditTestFind", f"edit-testapp {tag} torn", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                              300, 300, 300, 200, None, None, inst, None)
+            return 0
+        return u.DefWindowProcW(h, m, w, lp)
+
+    drag_wndproc = WNDPROC(drag_proc)
+    u.RegisterClassW(ctypes.byref(WNDCLASSW(lpfnWndProc=drag_wndproc, hInstance=inst, lpszClassName="EditTestDrag")))
+    drag = u.CreateWindowExW(0, "EditTestDrag", "", WS_POPUP, 0, 0, 0, 0, None, None, inst, None)
+    old = [0]
+
+    def tab_proc(h, m, w, lp):
+        r = u.CallWindowProcW(old[0], h, m, w, lp)
+        if m == WM_LBUTTONDOWN:
+            u.SetCapture(drag)  # 選んだあと、引きずる用意 (Delphi の BeginDrag と同じく、隠れた窓がつかむ)
+        return r
+
+    tab_wndproc = WNDPROC(tab_proc)
+    old[0] = u.SetWindowLongPtrW(tabs, -4, ctypes.cast(tab_wndproc, ctypes.c_void_p))  # GWLP_WNDPROC
+    return tabs, [drag_wndproc, tab_wndproc]
+
+
 def main() -> None:
     tag = sys.argv[1] if len(sys.argv) > 1 else "x"
     inst = k.GetModuleHandleW(None)
     edit = [0]
+    tabs = [0]
     menu = make_menu()
 
     def proc(hwnd, msg, wp, lp):
         if msg == WM_SIZE and edit[0]:
-            u.MoveWindow(edit[0], 0, BAR_H, lp & 0xFFFF, (lp >> 16 & 0xFFFF) - BAR_H, True)
+            w, h = lp & 0xFFFF, lp >> 16 & 0xFFFF
+            bottom = TAB_H if tabs[0] else 0
+            u.MoveWindow(edit[0], 0, BAR_H, w, h - BAR_H - bottom, True)
+            if tabs[0]:
+                u.MoveWindow(tabs[0], 0, h - TAB_H, w, TAB_H, True)
             return 0
         if msg == WM_SETFOCUS and edit[0]:
             u.SetFocus(edit[0])
@@ -147,6 +204,12 @@ def main() -> None:
                             200, 200, 500, 400, None, None, inst, None)
     edit[0] = u.CreateWindowExW(0, "EDIT", "", WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL
                                 | ES_WANTRETURN, 0, BAR_H, 480, 330, top, None, inst, None)
+    keep = []
+    if os.environ.get("EDIT_TESTAPP_TABS"):
+        tabs[0], keep = make_tabs(top, inst, tag)
+        r = wintypes.RECT()
+        u.GetClientRect(top, ctypes.byref(r))
+        proc(top, WM_SIZE, 0, r.bottom << 16 | r.right)
     u.SetFocus(edit[0])
     accel = u.CreateAcceleratorTableW(ctypes.byref(ACCEL(FVIRTKEY | FCONTROL, ord("S"), ID_SAVE)), 1)
     msg = wintypes.MSG()
