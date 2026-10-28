@@ -85,9 +85,9 @@ uv run check_close.py PortWho RepoTether         # × を押したとき: 一緒
 「設定」の「スマホから使う」で入り切りする (入れたかは settings.json の `remote` に覚え、次の起動でも始める)。
 
 ```sh
-uv run check_remote.py           # ドックに試験用の窓を 3 つ取り込み、noVNC と同じ WebSocket でつなぐ。設定の画面と QR コード、つないでいる間の知らせの窓、表示倍率、絵文字・日本語の変換・カタカナ (Tk と、Tk でない EDIT の窓)、ツールが開くメニューと小窓も (55 項目)
-uv run check_remote_android.py   # Android の実機 (USB デバッグ) の Chrome から。メニューと小窓、iPad の日本語の入力の並びも (18 項目)
-uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi で PC のこのアドレスにつなぐ (USB は試験の操作だけ。19 項目)
+uv run check_remote.py           # ドックに試験用の窓を 3 つ取り込み、noVNC と同じ WebSocket でつなぐ。設定の画面と QR コード、つないでいる間の知らせの窓、表示倍率、絵文字・日本語の変換・カタカナ (Tk と、Tk でない EDIT の窓)、ツールが開くメニューと小窓も (56 項目)
+uv run check_remote_android.py   # Android の実機 (USB デバッグ) の Chrome から。メニューと小窓、iPad の日本語の入力の並び、キーの記録も (19 項目)
+uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi で PC のこのアドレスにつなぐ (USB は試験の操作だけ。20 項目)
 ```
 
 - **Wi-Fi でつなぐときは、Windows のファイアウォールで受信の許可が要る。** 初めて待ち受けるときに出る確認で許可を押さないと、
@@ -264,6 +264,13 @@ uv run experiments/vnc_android_check.py                       # Android の実�
   元の文が見つからなければ当てずに配って remote.log に書く (noVNC の版を上げたら見直す)。iPad の実機は無いので、
   Android の Chrome の noVNC に iPad と同じ並びの出来事を起こして試した。直す前は「ssさnnんdどmmサンドマン」になり
   (報告と同じ形)、直した後は「サンドマン」になった。iPad の実機では試していない
+  - 直した exe で「sa と打って候補のサンドマンを選ぶと ssさサンドマン」と報告があった。remote.log では、iPad は exe が
+    待ち受けを始めた 4 秒後につないでおり、前から開いていたページが自動でつなぎ直した (手直し前の keyboard.js のまま) らしい。
+    推測の並びとも合わないので、iPad が実際に出す出来事を見る仕組みを足した:
+  - **キーの記録** (`remote.KEYLOG_JS`): つなぐ URL に `&keylog=1` を付けると、画面の左下に、入力欄の keydown / keyup
+    (key・code・keyCode・isComposing)、composition、input (inputType・入力欄の末尾)、PC へ送ったキーを出す。配る vnc.html に
+    読み込みを足し、URL に keylog が無ければ何もしない。手直しした keyboard.js を配ると remote.log に書く (ページを読み込み
+    直したかが分かる)
 - **前に開いた noVNC のタブが古い合言葉でつなぎ直し続けると、新しいタブの接続が 20 秒以上待たされた。** 断られた接続が続くと、
   Chrome が同じ相手への WebSocket を待たせる。合言葉を作り直したら、古いタブは閉じる。試験は決め打ちで待たず、つながるまで待つ
 - 画面のキーボードを出すと、その分だけブラウザの中が狭くなる (画面写真では下の端がキーボードに隠れた)。大きさを頼み直すかは未確認

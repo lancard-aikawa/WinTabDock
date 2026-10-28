@@ -191,7 +191,7 @@ def steps(dock: td.Dock) -> None:
             if dock.remote_server:
                 break
             time.sleep(0.1)
-        url = dock.remote_server.url
+        url = dock.remote_server.url + "&keylog=1"  # キーの記録も出す (iPad の様子を見るための画面が動くか)
         if not LAN:
             va.adb("reverse", f"tcp:{remote.DEFAULT_PORT}", f"tcp:{remote.DEFAULT_PORT}")
         va.adb("forward", f"tcp:{va.CDP_PORT}", "localabstract:chrome_devtools_remote")
@@ -262,6 +262,10 @@ def steps(dock: td.Dock) -> None:
         title = ck.wait_title(h1, "text=abc日本語🍦ニホンー。サンドマン ")
         ck.check("iPad の日本語の入力の並び (入力中のキーにも文字が付く) で、「サンドマン」が崩れない",
                  "text=abc日本語🍦ニホンー。サンドマン " in title, f"{title} / 届いたキー {' '.join(keys[-40:])}")
+        keylog = tab.js("(document.getElementById('wintabdock_keylog') || {}).textContent || ''")
+        ck.check("URL に keylog を付けると、キーと入力欄の出来事、PC へ送ったキーが画面に出る",
+                 "keydown key=\"Enter\"" in keylog and "send ド\n" in keylog and "send ド down" not in keylog,
+                 keylog[-300:].replace("\n", " | "))
         va.screenshot("dock-2-typed")
         tab.js("document.getElementById('noVNC_keyboardinput').blur()")
         time.sleep(1.0)

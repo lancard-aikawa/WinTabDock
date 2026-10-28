@@ -961,7 +961,65 @@ NOVNC_PATCHES = {
         "        }\n\n"
         "        // We cannot handle keys we cannot track, but we also need\n",
     ),
+    # URL に keylog が付いていたら、キーと入力欄の出来事、PC へ送ったキーを画面の隅に出す (KEYLOG_JS)。
+    # iPad が実際に何を出しているかを、iPad の実機が手元に無くても画面写真で見るため
+    "vnc.html": ("</head>", '<script type="module" src="wintabdock-keylog.js"></script>\n</head>'),
 }
+
+KEYLOG_PATH = "wintabdock-keylog.js"
+KEYLOG_JS = r"""// WinTabDock: with ?keylog in the URL, show keyboard events and the keys sent to the PC on screen.
+import RFB from './core/rfb.js';
+
+if (new URLSearchParams(location.search).has('keylog')) {
+    const box = document.createElement('pre');
+    box.id = 'wintabdock_keylog';
+    box.style.cssText = 'position:fixed;left:0;bottom:0;z-index:99999;margin:0;padding:4px;max-height:50vh;' +
+        'width:70vw;overflow:hidden;background:rgba(0,0,0,.8);color:#7f7;font:11px monospace;' +
+        'pointer-events:none;white-space:pre-wrap';
+    const lines = [];
+    const log = (s) => {
+        lines.push(s);
+        if (lines.length > 60) lines.shift();
+        box.textContent = lines.join('\n');
+    };
+    const show = (v) => JSON.stringify(v);
+    const ready = () => document.body.appendChild(box);
+    if (document.readyState === 'loading') addEventListener('DOMContentLoaded', ready); else ready();
+
+    const hook = () => {
+        const kbi = document.getElementById('noVNC_keyboardinput');
+        if (!kbi) { setTimeout(hook, 200); return; }
+        const tail = () => show(kbi.value.replace(/^_+/, '').slice(-8)) + ' sel=' + (kbi.selectionStart - kbi.value.length);
+        for (const t of ['keydown', 'keyup']) {
+            kbi.addEventListener(t, (e) => log(`${t} key=${show(e.key)} code=${show(e.code)} kc=${e.keyCode} comp=${e.isComposing}`), true);
+        }
+        for (const t of ['compositionstart', 'compositionupdate', 'compositionend']) {
+            kbi.addEventListener(t, (e) => log(`${t} ${show(e.data)}`), true);
+        }
+        kbi.addEventListener('input', (e) => log(`input ${e.inputType} ${show(e.data)} -> ${tail()}`), true);
+    };
+    hook();
+
+    // sendKey(keysym, code) は自分で down と up を呼ぶ。1 回の押して離すは 1 行にする
+    const orig = RFB.prototype.sendKey;
+    let depth = 0;
+    RFB.prototype.sendKey = function (keysym, code, down) {
+        if (depth === 0) {
+            const ch = (keysym >= 0x20 && keysym < 0x100) ? String.fromCharCode(keysym)
+                : ((keysym & 0xff000000) === 0x01000000) ? String.fromCodePoint(keysym & 0xffffff)
+                : '0x' + keysym.toString(16);
+            log(`    send ${ch}${down === undefined ? '' : (down ? ' down' : ' up')}`);
+        }
+        depth++;
+        try {
+            return orig.call(this, keysym, code, down);
+        } finally {
+            depth--;
+        }
+    };
+    log('keylog on');
+}
+"""
 
 
 def patch_novnc(rel: str, body: bytes) -> tuple[bytes, bool]:
@@ -1186,11 +1244,16 @@ class Server:
         rel = path.lstrip("/")
         ok = bool(_SAFE_PATH.fullmatch(rel)) and ".." not in rel.split("/")
         file = (self.web_root / rel).resolve() if ok else None
-        if file and file.is_file() and file.is_relative_to(self.web_root.resolve()):
+        if rel == KEYLOG_PATH:
+            body, status, ctype = KEYLOG_JS.encode("utf-8"), "200 OK", "text/javascript"
+        elif file and file.is_file() and file.is_relative_to(self.web_root.resolve()):
             body, patched = patch_novnc(rel, file.read_bytes())
             status = "200 OK"
             if not patched:
                 self.log(f"noVNC の {rel} に手直しを当てられなかった (元の文が見つからない)")
+            elif rel == "core/input/keyboard.js":
+                # ページを読み込み直したかを後から見るため (古いページは、つなぎ直しても手直し前のまま動く)
+                self.log("noVNC のキー入力 (keyboard.js、手直し済み) を配った")
             ctype = {".js": "text/javascript", ".mjs": "text/javascript"}.get(file.suffix) or \
                 mimetypes.guess_type(file.name)[0] or "application/octet-stream"
         else:
