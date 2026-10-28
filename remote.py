@@ -945,6 +945,36 @@ class Session:
 
 # ── サーバ ───────────────────────────────────────────────────────────────────
 
+# 配る noVNC への手直し (ファイル → (元の文, 直した文))。元の文が見つからなければ直さずに配り、remote.log に書く
+NOVNC_PATCHES = {
+    # iPad (iOS の Safari) は、日本語の入力中 (変換前) のキーにも、押したキーの文字 ("s" など。keyCode 229) を付けて
+    # keydown を出す。noVNC はそれを打ったキーとして送り、さらに入力欄の変化 (「s」→「さ」) からも文字を送るので、
+    # 「サンドマン」が「ssさnn…」のように二重になって崩れた。入力中のキーは送らず、入力欄の変化に任せる
+    # (Android の Chrome は入力中のキーの文字を "Unidentified" にするので、もともと何も送っていない)
+    "core/input/keyboard.js": (
+        "        // We cannot handle keys we cannot track, but we also need\n",
+        "        // WinTabDock: keys typed while an IME composes (iOS gives them the letter and keyCode 229)\n"
+        "        // are sent by the input event of the keyboard field. Do not send them twice.\n"
+        "        if (e.isComposing || e.keyCode === 229) {\n"
+        "            stopEvent(e);\n"
+        "            return;\n"
+        "        }\n\n"
+        "        // We cannot handle keys we cannot track, but we also need\n",
+    ),
+}
+
+
+def patch_novnc(rel: str, body: bytes) -> tuple[bytes, bool]:
+    """配る noVNC のファイルに手直しを当てる。(中身, 当てられたか)。手直しの無いファイルは当てられた扱い"""
+    if rel not in NOVNC_PATCHES:
+        return body, True
+    old, new = NOVNC_PATCHES[rel]
+    text = body.decode("utf-8")
+    if old not in text:
+        return body, False
+    return text.replace(old, new, 1).encode("utf-8"), True
+
+
 _SAFE_PATH = re.compile(r"[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*")  # 配るファイルの道 (noVNC のファイル名の文字だけ)
 
 
@@ -1157,7 +1187,10 @@ class Server:
         ok = bool(_SAFE_PATH.fullmatch(rel)) and ".." not in rel.split("/")
         file = (self.web_root / rel).resolve() if ok else None
         if file and file.is_file() and file.is_relative_to(self.web_root.resolve()):
-            body, status = file.read_bytes(), "200 OK"
+            body, patched = patch_novnc(rel, file.read_bytes())
+            status = "200 OK"
+            if not patched:
+                self.log(f"noVNC の {rel} に手直しを当てられなかった (元の文が見つからない)")
             ctype = {".js": "text/javascript", ".mjs": "text/javascript"}.get(file.suffix) or \
                 mimetypes.guess_type(file.name)[0] or "application/octet-stream"
         else:

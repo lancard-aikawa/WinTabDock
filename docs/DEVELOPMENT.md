@@ -85,9 +85,9 @@ uv run check_close.py PortWho RepoTether         # × を押したとき: 一緒
 「設定」の「スマホから使う」で入り切りする (入れたかは settings.json の `remote` に覚え、次の起動でも始める)。
 
 ```sh
-uv run check_remote.py           # ドックに試験用の窓を 3 つ取り込み、noVNC と同じ WebSocket でつなぐ。設定の画面と QR コード、つないでいる間の知らせの窓、表示倍率、絵文字・日本語の変換・カタカナ (Tk と、Tk でない EDIT の窓)、ツールが開くメニューと小窓も (54 項目)
-uv run check_remote_android.py   # Android の実機 (USB デバッグ) の Chrome から。メニューと小窓も (17 項目)
-uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi で PC のこのアドレスにつなぐ (USB は試験の操作だけ。18 項目)
+uv run check_remote.py           # ドックに試験用の窓を 3 つ取り込み、noVNC と同じ WebSocket でつなぐ。設定の画面と QR コード、つないでいる間の知らせの窓、表示倍率、絵文字・日本語の変換・カタカナ (Tk と、Tk でない EDIT の窓)、ツールが開くメニューと小窓も (55 項目)
+uv run check_remote_android.py   # Android の実機 (USB デバッグ) の Chrome から。メニューと小窓、iPad の日本語の入力の並びも (18 項目)
+uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi で PC のこのアドレスにつなぐ (USB は試験の操作だけ。19 項目)
 ```
 
 - **Wi-Fi でつなぐときは、Windows のファイアウォールで受信の許可が要る。** 初めて待ち受けるときに出る確認で許可を押さないと、
@@ -255,6 +255,15 @@ uv run experiments/vnc_android_check.py                       # Android の実�
   - 同じ報告の「メニューが上手く表示されないことが多い」は再現していない。Mery の「検索(S)」を試験の接続で 6 回、
     試験用の窓のメニューを実機で 5 回開いて、毎回写った
 - 試験の後始末: `mery_remote_probe.py` が途中で落ちて、起動した Mery が残ったことがある (無題で何も打っていない)
+- **iPad で「サンドマン」と打つと「ssさnn…dm」のように崩れた** (ユーザーの報告、2026-10-28)。iOS の Safari は、日本語の入力中
+  (変換前) のキーにも、押したキーの文字 ("s") と keyCode 229 を付けた keydown を出す。noVNC (core/input/keyboard.js) は、
+  code が分からないキーでも文字があれば打ったキーとして送り、さらに入力欄の変化 (app/ui.js の keyInput。「s」→「さ」なら
+  BackSpace と「さ」) からも送るので二重になった。確定の Enter (keyCode 229) も送っていた。Android の Chrome は入力中のキーの
+  文字を "Unidentified" にするので、もともと入力欄の変化だけで届いていた。
+  配る keyboard.js に手直しを当てる (`remote.NOVNC_PATCHES`): 入力中のキー (isComposing か keyCode 229) は送らない。
+  元の文が見つからなければ当てずに配って remote.log に書く (noVNC の版を上げたら見直す)。iPad の実機は無いので、
+  Android の Chrome の noVNC に iPad と同じ並びの出来事を起こして試した。直す前は「ssさnnんdどmmサンドマン」になり
+  (報告と同じ形)、直した後は「サンドマン」になった。iPad の実機では試していない
 - **前に開いた noVNC のタブが古い合言葉でつなぎ直し続けると、新しいタブの接続が 20 秒以上待たされた。** 断られた接続が続くと、
   Chrome が同じ相手への WebSocket を待たせる。合言葉を作り直したら、古いタブは閉じる。試験は決め打ちで待たず、つながるまで待つ
 - 画面のキーボードを出すと、その分だけブラウザの中が狭くなる (画面写真では下の端がキーボードに隠れた)。大きさを頼み直すかは未確認

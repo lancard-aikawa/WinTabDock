@@ -68,6 +68,15 @@ def http_status(path: str) -> int:
         return int(s.recv(64).split(b" ")[1])
 
 
+def http_body(path: str) -> str:
+    with socket.create_connection(("127.0.0.1", PORT), timeout=5) as s:
+        s.sendall(f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{PORT}\r\n\r\n".encode())
+        data = b""
+        while chunk := s.recv(65536):
+            data += chunk
+    return data.split(b"\r\n\r\n", 1)[1].decode("utf-8", "replace")
+
+
 class Client:
     """noVNC と同じく WebSocket でつなぐ最小の VNC クライアント (Zlib と Raw を読む)。"""
 
@@ -175,6 +184,9 @@ def steps(dock: td.Dock) -> None:
         good_origin = f"http://127.0.0.1:{PORT}"
         check("トップのページ (/) は見せない", http_status("/") == 404)
         check("noVNC のページは配る", http_status("/vnc.html") == 200)
+        kb = http_body("/core/input/keyboard.js")
+        check("noVNC に手直しを当てて配る (iPad の日本語の入力中のキーを送らない)",
+              "WinTabDock: keys typed while an IME composes" in kb, f"{len(kb)} 文字")
         bad = ["/\\\\127.0.0.1\\c$\\x", "/C:/Windows/win.ini", "/../remote.log", "/app/../../remote.log", "/%5C%5Cx"]
         check("noVNC のフォルダの外 (\\\\相手\\共有・C:・..) は配らない (ファイルに触れる前に断る)",
               all(http_status(p) == 404 for p in bad)

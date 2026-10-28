@@ -73,6 +73,29 @@ def dock_button_pos(dock: td.Dock, button) -> tuple[int, int]:
     return round((x - ox + w // 2) * s), round((y - oy + h // 2) * s)
 
 
+# iPad で「sandoman」と打って「サンドマン」に変換し、確定するときの出来事 (noVNC の入力欄に起こす)
+IOS_IME_JS = """(() => {
+  const kbi = document.getElementById('noVNC_keyboardinput');
+  const base = kbi.value;
+  const key = (type, k, composing) => {
+    const e = new KeyboardEvent(type, {key: k, bubbles: true, cancelable: true, isComposing: composing});
+    Object.defineProperty(e, 'keyCode', {get: () => 229});
+    kbi.dispatchEvent(e);
+  };
+  const steps = [['s', 's'], ['a', 'さ'], ['n', 'さn'], ['d', 'さんd'], ['o', 'さんど'], ['m', 'さんどm'],
+                 ['a', 'さんどま'], ['n', 'さんどまn'], ['n', 'さんどまん'], [' ', 'サンドマン']];
+  steps.forEach(([k, text], i) => {
+    key('keydown', k, i > 0);
+    kbi.value = base + text;
+    kbi.dispatchEvent(new InputEvent('input', {bubbles: true, data: k}));
+    key('keyup', k, true);
+  });
+  key('keydown', 'Enter', true);  // 確定
+  key('keyup', 'Enter', false);
+  return true;
+})()"""
+
+
 def start_edit_app(tag: str) -> tuple[subprocess.Popen, int]:
     """Tk でない試験用の窓 (experiments/edit_testapp.py。上の帯を押すとメニュー、その「検索...」で小窓)。"""
     title = f"edit-testapp {tag}"
@@ -232,6 +255,13 @@ def steps(dock: td.Dock) -> None:
         title = ck.wait_title(h1, "text=abc日本語🍦ニホンー。 ")
         ck.check("カタカナに変換した字と「ー」「。」を打てる", "text=abc日本語🍦ニホンー。 " in title,
                  f"{title} / 届いたキー {' '.join(keys[-12:])}")
+        # iPad (iOS の Safari) の日本語の入力と同じ並び。入力中のキーにも押したキーの文字と keyCode 229 を付けた keydown が
+        # 来て、そのあと入力欄が変わる (「s」→「さ」…)。noVNC がキーと入力欄の変化の両方から送り、「サンドマン」が
+        # 「ssさnn…」と崩れた。Android の Chrome はこう出さないので、出来事を作って noVNC に渡す
+        tab.js(IOS_IME_JS)
+        title = ck.wait_title(h1, "text=abc日本語🍦ニホンー。サンドマン ")
+        ck.check("iPad の日本語の入力の並び (入力中のキーにも文字が付く) で、「サンドマン」が崩れない",
+                 "text=abc日本語🍦ニホンー。サンドマン " in title, f"{title} / 届いたキー {' '.join(keys[-40:])}")
         va.screenshot("dock-2-typed")
         tab.js("document.getElementById('noVNC_keyboardinput').blur()")
         time.sleep(1.0)
