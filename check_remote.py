@@ -16,6 +16,7 @@ noVNC を開いたブラウザのタブは閉じておく (自動でつなぎ直
 """
 
 import ctypes
+import ctypes.wintypes
 import json
 import os
 import socket
@@ -326,6 +327,7 @@ def steps(dock: td.Dock) -> None:
         title = ck.wait_title(h2, "count=1")
         check("縮めた画面の上でも押せる", "count=1" in title, title)
         edit_steps(dock, c, edit_app)
+        menu_steps(dock, c, edit_app)
 
         c.close()
         c = None
@@ -494,13 +496,105 @@ def edit_steps(dock: td.Dock, c, edit_app) -> None:
     for ks in seq:
         c.key(ks)
     time.sleep(1.0)
-    edit = remote.child_at(he, 20, 20)[0]
+    text = edit_text(he)
+    want = "abc\r\n日本語🍦ニホー"
+    check("Tk でない窓 (EDIT) にも、日本語の変換・カタカナ・絵文字・Enter・Tab・BackSpace・矢印・Delete が送った順に効く",
+          text == want, f"{text!r} / 期待 {want!r}")
+
+
+def edit_text(he: int) -> str:
+    edit = ctypes.windll.user32.FindWindowExW(he, None, "EDIT", None)
     n = td.user32.SendMessageW(edit, 0x000E, 0, 0)  # WM_GETTEXTLENGTH
     buf = ctypes.create_unicode_buffer(n + 1)
     ctypes.windll.user32.SendMessageW(edit, 0x000D, n + 1, buf)  # WM_GETTEXT
-    want = "abc\r\n日本語🍦ニホー"
-    check("Tk でない窓 (EDIT) にも、日本語の変換・カタカナ・絵文字・Enter・Tab・BackSpace・矢印・Delete が送った順に効く",
-          buf.value == want, f"{buf.value!r} / 期待 {want!r}")
+    return buf.value
+
+
+def find_menus(top: int) -> list[int]:
+    """top と同じスレッドの、見えているメニューの窓 (#32768。一番上の段から)。"""
+    tid = td.user32.GetWindowThreadProcessId(top, None)
+    return [h for h in all_windows()[::-1] if window_class(h) == "#32768" and td.user32.IsWindowVisible(h)
+            and td.user32.GetWindowThreadProcessId(h, None) == tid]
+
+
+def menu_item_pos(dock: td.Dock, menu: int, i: int) -> tuple[int, int]:
+    """メニューの i 番目の項目の真ん中 (ドックの内側の座標)。"""
+    hmenu = ctypes.windll.user32.SendMessageW(menu, 0x01E1, 0, 0)  # MN_GETHMENU
+    r = ctypes.wintypes.RECT()
+    ctypes.windll.user32.GetMenuItemRect(None, ctypes.c_void_p(hmenu), i, ctypes.byref(r))
+    ox, oy = remote.client_origin(dock.dock_hwnd)
+    return (r.left + r.right) // 2 - ox, (r.top + r.bottom) // 2 - oy
+
+
+def menu_steps(dock: td.Dock, c, edit_app) -> None:
+    """Mery のメニューの帯と同じく、押した時にメニューを出す窓 (experiments/edit_testapp.py の上の帯)。メニューは別の窓
+    (#32768) で、ドックが画面の外にあると Windows が PC の画面の中へ寄せて出し、遠隔からは見えなかった"""
+    _, he = edit_app
+    view = dock.remote_server.view
+    s = view.scale
+    _, tx, ty, tw, th = RemoteSource_layers(dock)[1]
+    before = edit_text(he)
+
+    # 直す前の作り (メニューを扱わない remote.py) でも、例外で止まらずに落ちるようにする
+    view_layers = getattr(view, "layers", view.source.layers)
+
+    def wait_menus(n: int) -> list[int]:
+        for _ in range(60):
+            menus = find_menus(he)
+            placed = view.menus.placed if hasattr(view, "menus") else {}
+            if len(menus) == n and all(h in placed for h in menus):
+                return menus
+            view_layers()
+            time.sleep(0.05)
+        return find_menus(he)
+
+    def tap(x: float, y: float) -> None:
+        c.tap(round(x * s), round(y * s))
+
+    tap(tx + 20, ty + 10)  # 帯の「ファイル」
+    menus = wait_menus(1)
+    right = td.user32.GetSystemMetrics(76) + td.user32.GetSystemMetrics(78)
+    rects = [td.rect_of(h) for h in menus]
+    check("ツールのメニューが開き、PC の画面ではなく画面の外 (ドックの横) に出る",
+          len(menus) == 1 and rects[0][0] >= right, f"{rects} / 画面の右端 {right}")
+    layer = next((lr for lr in view_layers() if menus and lr[0] == menus[0]), None)
+    img = c.full_frame()
+    img.save(OUT / "remote-5-menu.png")
+    shown = layer and img.crop((round(layer[1] * s), round(layer[2] * s), round((layer[1] + layer[3]) * s),
+                                round((layer[2] + layer[4]) * s)))
+    # 帯の高さは 28。メニューの内側は、窓の縁の分だけ下
+    check("メニューが遠隔の画面に写り、出るはずの所 (帯の下) にある",
+          bool(layer) and ty + 26 <= layer[2] <= ty + 40 and is_light(shown), f"メニュー {layer} ツール {(tx, ty)}")
+    if len(menus) != 1:
+        return
+
+    t0 = time.monotonic()
+    tap(*menu_item_pos(dock, menus[0], 1))  # 「その他」(下の段を開く)
+    menus = wait_menus(2)
+    opened = time.monotonic() - t0
+    if len(menus) == 2:
+        tap(*menu_item_pos(dock, menus[1], 0))  # 「SUB を挿入」
+    time.sleep(0.5)
+    text = edit_text(he)
+    # 押した時にメニューを出すツールは、閉じるまで「押した」の処理から戻らない。待ち続けると受け取りが 5 秒止まった
+    check("メニューの下の段を開いて、その項目を選べる (開くのに 2 秒かからない)",
+          text == before + "SUB" and opened < 2 and not find_menus(he), f"{text!r} 開くまで {opened:.1f} 秒")
+
+    tap(tx + 20, ty + 10)
+    wait_menus(1)
+    tap(tx + 3, ty + 36)  # メニューの外 (EDIT の 1 行目の頭。ツールに届けば、文字を足す所がそこへ動く)
+    time.sleep(0.5)
+    closed = not find_menus(he)
+    tap(tx + 20, ty + 10)
+    wait_menus(1)
+    for ks in (0xFF54, 0xFF0D):  # ↓ Enter
+        c.key(ks)
+    time.sleep(0.5)
+    text = edit_text(he)
+    check("メニューの外を押すと閉じ、その押し込みはツールに届かない", closed and text.startswith("abc"),
+          f"閉じた {closed} {text!r}")
+    check("メニューを開いている間のキー (↓ Enter) はメニューに効く",
+          text == before + "SUBXYZ" and not find_menus(he), repr(text))
 
 
 def record_keys(dock: td.Dock) -> list[str]:

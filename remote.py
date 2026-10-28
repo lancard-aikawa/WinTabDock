@@ -64,6 +64,13 @@ _u.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
 _u.FillRect.argtypes = [wintypes.HDC, ctypes.POINTER(wintypes.RECT), wintypes.HBRUSH]
 _u.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
 _u.MapVirtualKeyW.argtypes = [wintypes.UINT, wintypes.UINT]
+_u.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                            wintypes.UINT]
+_u.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+_u.MenuItemFromPoint.argtypes = [wintypes.HWND, wintypes.HMENU, wintypes.POINT]
+_u.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+_u.MonitorFromWindow.restype = wintypes.HMONITOR
+_u.GetMonitorInfoW.argtypes = [wintypes.HMONITOR, ctypes.c_void_p]
 gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
 gdi32.CreateCompatibleDC.restype = wintypes.HDC
 gdi32.CreateDIBSection.argtypes = [wintypes.HDC, ctypes.c_void_p, wintypes.UINT, ctypes.POINTER(ctypes.c_void_p),
@@ -93,7 +100,11 @@ SEND_TIMEOUT_MS = 5000
 WM_ACTIVATE, WA_ACTIVE, WM_SETFOCUS = 0x0006, 1, 0x0007
 WM_KEYDOWN, WM_KEYUP, WM_CHAR, WM_UNICHAR = 0x0100, 0x0101, 0x0102, 0x0109
 WM_MOUSEMOVE, WM_MOUSEWHEEL = 0x0200, 0x020A
+# メニューの窓 (#32768) へのメッセージ (文書には無いが、Windows 自身がメニューの窓に使う)。項目の番号を渡す
+MN_GETHMENU, MN_SELECTITEM, MN_CANCELMENUS, MN_BUTTONDOWN, MN_BUTTONUP = 0x01E1, 0x01E5, 0x01E6, 0x01ED, 0x01EF
+SWP_NOSIZE, SWP_NOZORDER, SWP_NOACTIVATE = 0x0001, 0x0004, 0x0010
 BUTTON_MSGS = {1: (0x0201, 0x0202, 0x0001), 2: (0x0207, 0x0208, 0x0010), 4: (0x0204, 0x0205, 0x0002)}  # 左・中・右
+DOWN_MSGS = {down for down, _, _ in BUTTON_MSGS.values()}
 
 
 class BITMAPINFOHEADER(ctypes.Structure):
@@ -138,6 +149,7 @@ def _dib(dc: int, w: int, h: int) -> tuple[int, ctypes.c_void_p]:
 _chromium: dict[int, bool] = {}
 _EnumProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, LPARAM)
 _u.EnumChildWindows.argtypes = [wintypes.HWND, _EnumProc, LPARAM]
+_u.EnumWindows.argtypes = [_EnumProc, LPARAM]
 _u.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 
 
@@ -230,6 +242,102 @@ class Source(Protocol):
     def title(self) -> str: ...
 
 
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT), ("rcWork", wintypes.RECT),
+                ("dwFlags", wintypes.DWORD)]
+
+
+def window_rect(hwnd: int) -> tuple[int, int, int, int]:
+    r = wintypes.RECT()
+    _u.GetWindowRect(hwnd, ctypes.byref(r))
+    return r.left, r.top, r.right, r.bottom
+
+
+def send_result(hwnd: int, msg: int, wp: int = 0, lp: int = 0) -> int:
+    res = ctypes.c_size_t()
+    _u.SendMessageTimeoutW(hwnd, msg, wp, lp, SMTO_ABORTIFHUNG, SEND_TIMEOUT_MS, ctypes.addressof(res))
+    return res.value
+
+
+class Menus:
+    """選んでいるツールが開いたメニュー (#32768 の窓)。メニューはツールの窓とは別の窓で、持ち主 (owner) も無い。
+    ドックは画面の外にあるので、Windows はメニューを画面の中へ寄せて出す (遠隔からは見えず、PC の画面に出ていた)。
+    見つけたら、ドックの横 (画面の外) の、出るはずだった所へ移して、遠隔の画面に重ねる。"""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.placed: dict[int, tuple[int, int]] = {}  # 移したメニューの窓 → 移した先 (画面の座標)
+        self.anchor = (0, 0)  # 最後に押した所 (見せる範囲の座標)。メニューの横の位置にする
+
+    @staticmethod
+    def find(top: int) -> list[int]:
+        """top と同じスレッドの、見えているメニューの窓 (奥から。最初が一番上の段)。"""
+        tid = _u.GetWindowThreadProcessId(top, None)
+        found: list[int] = []
+        buf = ctypes.create_unicode_buffer(16)
+
+        def cb(h, _):
+            _u.GetClassNameW(h, buf, 16)
+            if buf.value == "#32768" and _u.IsWindowVisible(h) and _u.GetWindowThreadProcessId(h, None) == tid:
+                found.append(h)
+            return True
+
+        _u.EnumWindows(_EnumProc(cb), 0)
+        return found[::-1]
+
+    def layers(self, top: int, dock: int, view_w: float, view_h: float) -> list[Layer]:
+        with self.lock:
+            menus = self.find(top)
+            self.placed = {h: p for h, p in self.placed.items() if h in menus}  # 閉じた窓は使い回される
+            ox, oy = client_origin(dock)
+            out: list[Layer] = []
+            parent = None  # 一つ上の段の、窓の範囲 (見せる範囲の座標)
+            for h in menus:
+                l, t, r, b = window_rect(h)
+                if self.placed.get(h) != (l, t):
+                    x, y = self._place(h, (l - ox, t - oy, r - l, b - t), b, parent, view_w, view_h)
+                    _u.SetWindowPos(h, None, ox + x, oy + y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
+                    self.placed[h] = (ox + x, oy + y)
+                    l, t, r, b = window_rect(h)
+                parent = (l - ox, t - oy, r - l, b - t)
+                cx, cy = client_origin(h)
+                out.append((h, cx - ox, cy - oy, *client_size(h)))
+            return out
+
+    def _place(self, hwnd: int, rect: tuple[int, int, int, int], screen_bottom: int,
+               parent: tuple[int, int, int, int] | None, view_w: float, view_h: float) -> tuple[int, int]:
+        """メニューを置く所 (見せる範囲の座標)。縦は Windows が出した位置 (ドックは画面と同じ高さにあるので、
+        ツールが頼んだ位置のまま)。ただし画面の下で寄せられていたら、押した所にする。横は画面の外へ出せないので
+        寄せられている。一番上の段は押した所、下の段は上の段の右 (入らなければ左)"""
+        x, y, w, h = rect
+        if parent is None:
+            info = MONITORINFO(cbSize=ctypes.sizeof(MONITORINFO))
+            _u.GetMonitorInfoW(_u.MonitorFromWindow(hwnd, 2), ctypes.byref(info))  # MONITOR_DEFAULTTONEAREST
+            if y < 0 or screen_bottom >= min(info.rcWork.bottom, info.rcMonitor.bottom) - 1:
+                y = round(self.anchor[1])
+            x = round(self.anchor[0])
+        else:
+            px, _, pw, _ = parent
+            x = px + pw - 3  # Windows も少し重ねる
+            if x + w > view_w:
+                x = px - w + 3
+        x = max(0, min(x, round(view_w) - w))
+        y = max(0, min(y, round(view_h) - h))
+        return x, y
+
+    def item_at(self, hwnd: int, x: int, y: int) -> int:
+        """メニューの内側の (x, y) にある項目の番号。無ければ -1。"""
+        hmenu = send_result(hwnd, MN_GETHMENU)
+        cx, cy = client_origin(hwnd)
+        return _u.MenuItemFromPoint(None, hmenu, wintypes.POINT(cx + x, cy + y)) if hmenu else -1
+
+    def cancel(self, top: int) -> None:
+        """開いているメニューを全部閉じる (一番上の段に MN_CANCELMENUS。下の段の窓に Esc を置いても効かなかった)。"""
+        menus = self.find(top)
+        if menus:
+            _u.SendMessageTimeoutW(menus[0], MN_CANCELMENUS, 0, 0, SMTO_ABORTIFHUNG, SEND_TIMEOUT_MS, None)
+
+
 class View:
     """Source を VNC の画面にする。VNC の画面の画素 = 窓の画素 x scale。
 
@@ -244,7 +352,17 @@ class View:
         self.zoom = zoom
         self.scale = 1.0
         self.lock = threading.Lock()
+        self.menus = Menus()
         self.input = WindowInput(self)
+
+    def layers(self) -> list[Layer]:
+        """見せる窓。Source の窓に、選んでいるツールが開いたメニューを足す (メニューは画面の外の出る所へ移す)。"""
+        layers = self.source.layers()
+        top = self.source.key_window()
+        if top and layers:
+            w, h = self.fb_size()
+            layers += self.menus.layers(top, layers[0][0], w / self.scale, h / self.scale)
+        return layers
 
     def _fit(self) -> float:
         w, h = self.source.extent()
@@ -275,12 +393,12 @@ class View:
         with self.lock:
             self.scale = self._fit()
             w, h = self.fb_size()
-            return compose(self.source.layers(), w, h, self.scale)
+            return compose(self.layers(), w, h, self.scale)
 
     def hit(self, x: int, y: int) -> tuple[int, int, int] | None:
         """VNC の画面の (x, y) にある窓と、その内側の座標 (上の窓から探す)。"""
         cx, cy = x / self.scale, y / self.scale
-        for hwnd, lx, ly, lw, lh in reversed(self.source.layers()):
+        for hwnd, lx, ly, lw, lh in reversed(self.layers()):
             if lx <= cx < lx + lw and ly <= cy < ly + lh:
                 return hwnd, int(cx - lx), int(cy - ly)
         return None
@@ -304,6 +422,7 @@ class WindowInput:
         self.blocked = False  # 押してはいけない所を押した。離すまで何も送らない
         self.high_surrogate = 0  # 絵文字の代理対の前半 (後半が来るまで控える)
         self.send_failures: list = []  # 渡せなかったもの (メッセージ, 値, GetLastError)
+        self.menu_press = False  # メニューの上で押した (離した時に項目を選ぶ)
 
     def pointer(self, mask: int, x: int, y: int) -> None:
         with self.lock:
@@ -323,6 +442,12 @@ class WindowInput:
                 self._pointer(self.buttons, *self.last)
 
     def _pointer(self, mask: int, x: int, y: int) -> None:
+        if mask & ~self.buttons & 7:
+            self.view.menus.anchor = (x / self.view.scale, y / self.view.scale)
+        tool = self.view.source.key_window()
+        if tool and (self.menu_press or Menus.find(tool)):
+            self._menu_pointer(tool, mask, x, y)
+            return
         if self.buttons & 7 and self.press:
             top, child = self.press
             hit = self.view.hit(x, y)
@@ -372,20 +497,112 @@ class WindowInput:
                 for bit, vk in ((1, 0x01), (2, 0x04), (4, 0x02)):  # VK_LBUTTON / VK_MBUTTON / VK_RBUTTON
                     state[vk] = 0x80 if mask & bit else 0
                 _u.SetKeyboardState(state)
+            menu_opened = False
             for msg, wp, lp in msgs:
-                _u.SendMessageTimeoutW(child, msg, wp, lp, SMTO_ABORTIFHUNG, SEND_TIMEOUT_MS, None)
+                if msg in DOWN_MSGS:
+                    menu_opened = self._send_press(top, child, msg, wp, lp)
+                    if menu_opened:
+                        break
+                else:
+                    _u.SendMessageTimeoutW(child, msg, wp, lp, SMTO_ABORTIFHUNG, SEND_TIMEOUT_MS, None)
         finally:
             if attached:
                 _u.AttachThreadInput(me, tid, False)
-        if pressing:
+        if pressing and not menu_opened:
             _u.SendMessageTimeoutW(top, WM_ACTIVATE, WA_ACTIVE, 0, SMTO_ABORTIFHUNG, SEND_TIMEOUT_MS, None)
             _u.SendMessageTimeoutW(child, WM_SETFOCUS, 0, 0, SMTO_ABORTIFHUNG, SEND_TIMEOUT_MS, None)
+
+    def _send_press(self, top: int, hwnd: int, msg: int, wp: int, lp: int) -> bool:
+        """押した知らせを渡して、処理し終えるのを待つ。押した時にメニューを出すツール (Mery のメニューの帯) は、
+        メニューを閉じるまで処理から戻らないので、待ち続けると遠隔からメニューを選べない (受け取りが 5 秒止まる)。
+        メニューが開いたら待つのをやめる。開いたら True"""
+        done = threading.Event()
+
+        def run() -> None:
+            _u.SendMessageTimeoutW(hwnd, msg, wp, lp, SMTO_ABORTIFHUNG, SEND_TIMEOUT_MS, None)
+            done.set()
+
+        threading.Thread(target=run, daemon=True).start()
+        while not done.wait(0.02):
+            if Menus.find(top):
+                self.view.layers()  # すぐ画面の外へ移す (PC の画面に出ている間を短くする)
+                return True
+        return False
+
+    @staticmethod
+    def _set_button_state(top: int, mask: int) -> None:
+        """top のスレッドの入力の状態の、マウスのボタンを mask にする。"""
+        tid = _u.GetWindowThreadProcessId(top, None)
+        me = kernel32.GetCurrentThreadId()
+        if _u.AttachThreadInput(me, tid, True):
+            try:
+                state = (ctypes.c_ubyte * 256)()
+                _u.GetKeyboardState(state)
+                for bit, vk in ((1, 0x01), (2, 0x04), (4, 0x02)):  # VK_LBUTTON / VK_MBUTTON / VK_RBUTTON
+                    state[vk] = 0x80 if mask & bit else 0
+                _u.SetKeyboardState(state)
+            finally:
+                _u.AttachThreadInput(me, tid, False)
+
+    def _menu_pointer(self, tool: int, mask: int, x: int, y: int) -> None:
+        """メニューを開いている間の押す・動かす。ツールはメニューの処理の中で本物のマウスを見ているので、窓への
+        マウスのメッセージは効かない。メニューの窓に、項目の番号で「選ぶ」「押す」「離す」を渡す"""
+        pressing = mask & ~self.buttons & 7
+        releasing = self.buttons & ~mask & 7
+        hit = self.view.hit(x, y)  # メニューを探して移すのもここ
+        menu = hit[0] if hit and hit[0] in self.view.menus.placed else 0
+        if not mask & 7:
+            self.press = None
+        if releasing:
+            # メニューを開いた押し込みで、ツールの入力の状態を「押している」にしたままになる。メニューは押したまま
+            # (ドラッグ中) だと思い、キー (↓ Enter) を受け付けなかった
+            self._set_button_state(tool, mask)
+            if releasing & 1 and not self.menu_press:
+                menus = Menus.find(tool)
+                if menus:
+                    # メニューは押したまま開くと、受け取りの列に「離した」が来るまで待っている。項目の無い所 (遠く) で離す
+                    _u.PostMessageW(menus[0], BUTTON_MSGS[1][1], 0, lparam_xy(-30000, -30000))
+        if pressing:
+            self.menu_press = bool(menu)
+            if not menu:
+                # メニューの外を押すと閉じる。Windows と同じく、その押し込みはツールに渡さない (離すまで何も送らない)
+                self.view.menus.cancel(tool)
+                self.blocked = True
+                return
+        if self.blocked:
+            if not mask & 7:
+                self.blocked = False
+            return
+        if menu:
+            idx = self.view.menus.item_at(menu, hit[1], hit[2])
+
+            def send(m: int) -> None:
+                _u.SendMessageTimeoutW(menu, m, idx & 0xFFFFFFFF, 0, SMTO_ABORTIFHUNG, SEND_TIMEOUT_MS, None)
+
+            send(MN_SELECTITEM)
+            # 項目を押して離すと選ぶ (下の段を持つ項目は押すと開く)。開いた時の押し込み (帯の上) を離しても選ばない
+            if idx >= 0 and pressing & 1:
+                send(MN_BUTTONDOWN)
+            if idx >= 0 and releasing & 1 and self.menu_press:
+                send(MN_BUTTONUP)
+        if not mask & 7:
+            self.menu_press = False
 
     def key(self, down: bool, keysym: int) -> None:
         vk = SPECIAL_KEYS.get(keysym)
         ch = None if vk else keysym_char(keysym)
         top = self.view.source.key_window()
         if (vk is None and ch is None) or not top:
+            return
+        menus = Menus.find(top)
+        if menus:
+            # メニューを開いている間、ツールはメニューの処理の中で受け取りの列からキーを読む (SendMessage では届かない)。
+            # 一番上の段の窓に置く (下の段の窓に置いても効かなかった)。↓ ↑ → ← Enter Esc と、項目の頭文字
+            if vk and vk not in (0x10, 0x11, 0x12):
+                lp = 1 | _u.MapVirtualKeyW(vk, 0) << 16
+                _u.PostMessageW(menus[0], WM_KEYDOWN if down else WM_KEYUP, vk, lp if down else lp | 0xC0000000)
+            elif ch and down:
+                _u.PostMessageW(menus[0], WM_CHAR, ord(ch), 1)
             return
         dest = focus_of(top) or self.key_child or top
 
