@@ -9,6 +9,7 @@
 import ctypes
 import os
 import sys
+import time
 import tkinter as tk
 
 ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -31,8 +32,15 @@ def update_title(*_):
                f" ev={','.join(events[-6:])}")
 
 
+LOG = os.environ.get("VNC_TESTAPP_LOG")  # 受けた出来事を全部書き出す (試験が時々落ちるのを調べる)
+
+
 def note(ev):
     events.append(f"{ev.type}@{ev.widget.winfo_class()}")
+    if LOG:
+        with open(LOG, "a", encoding="utf-8") as f:
+            f.write(f"{time.monotonic():.3f} {TAG} {ev.type} {ev.widget.winfo_class()} {getattr(ev, 'x', '')} "
+                    f"{getattr(ev, 'y', '')} {getattr(ev, 'keysym', '')}\n")
     update_title()
 
 
@@ -51,7 +59,7 @@ entry.place(x=60, y=170, width=300, height=40)
 text.trace_add("write", update_title)
 root.bind("<Configure>", update_title)
 entry.bind("<Control-s>", lambda e: (text.set(text.get() + "[S]"), entry.icursor("end"), "break")[-1])  # Ctrl を遠隔から
-for seq in ("<ButtonPress>", "<ButtonRelease>", "<Enter>", "<Leave>", "<KeyPress>", "<FocusIn>"):
+for seq in ("<ButtonPress>", "<ButtonRelease>", "<Enter>", "<Leave>", "<KeyPress>", "<FocusIn>") + (("<FocusOut>",) if LOG else ()):
     root.bind_all(seq, note, add="+")
 update_title()
 if os.environ.get("VNC_TESTAPP_SECOND"):  # 同じプロセスのもう 1 つの普通の窓 (VS Code の 2 つ目の窓の代わり)

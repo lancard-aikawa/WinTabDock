@@ -17,6 +17,7 @@ import ctypes
 import hashlib
 import io
 import mimetypes
+import os
 import queue
 import re
 import secrets
@@ -157,6 +158,15 @@ def client_origin(hwnd: int) -> tuple[int, int]:
     pt = wintypes.POINT(0, 0)
     _u.ClientToScreen(hwnd, ctypes.byref(pt))
     return pt.x, pt.y
+
+
+INPUT_LOG = os.environ.get("WINTABDOCK_INPUT_LOG")  # 押す・離す・キーの宛先を書き出す (試験が時々落ちるのを調べる)
+
+
+def input_log(msg: str) -> None:
+    if INPUT_LOG:
+        with open(INPUT_LOG, "a", encoding="utf-8") as f:
+            f.write(f"{time.monotonic():.3f} remote {msg}\n")
 
 
 def lparam_xy(x: int, y: int) -> int:
@@ -501,6 +511,9 @@ class WindowInput:
         pressing = mask & ~self.buttons & 7
         if pressing and not self.view.source.click_allowed(top, child, mask):
             self.blocked = True
+        if INPUT_LOG and (pressing or self.buttons & ~mask & 7):
+            input_log(f"{'press' if pressing else 'release'} mask={mask} at {x},{y} top={top} child={child} "
+                      f"local={cx},{cy} blocked={self.blocked} under={_u.WindowFromPoint(wintypes.POINT(client_origin(child)[0] + cx, client_origin(child)[1] + cy))} child_under={child}")
         if self.blocked:
             # 断った押し込みは、離すまで何も送らない。押した状態の移動を送るだけでも、Tk はマウスの状態から
             # 「押された」ことにする (「+ 起動」のメニューが遠隔から開いてしまった)
@@ -634,6 +647,8 @@ class WindowInput:
         top = self.view.source.key_window()
         if (vk is None and ch is None) or not top:
             return
+        if INPUT_LOG and down:
+            input_log(f"key {keysym:#x} top={top} key_child={getattr(self, 'key_child', None)} focus={focus_of(top)}")
         if vk in MODIFIER_VKS:
             self._modifier(top, keysym, down)
             return
@@ -1221,6 +1236,9 @@ import RFB from './core/rfb.js';
 if (new URLSearchParams(location.search).has('keylog')) {
     const box = document.createElement('pre');
     box.id = 'wintabdock_keylog';
+    // Chrome's page translation rewrote the log ("send X" became Japanese). Keep it as is
+    box.setAttribute('translate', 'no');
+    box.className = 'notranslate';
     box.style.cssText = 'position:fixed;left:0;bottom:0;z-index:99999;margin:0;padding:4px;max-height:50vh;' +
         'width:70vw;overflow:hidden;background:rgba(0,0,0,.8);color:#7f7;font:11px monospace;' +
         'pointer-events:none;white-space:pre-wrap';

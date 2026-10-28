@@ -28,6 +28,8 @@ from pathlib import Path
 
 HOME = Path(tempfile.mkdtemp(prefix="wintabdock-android-"))
 os.environ["WINTABDOCK_HOME"] = str(HOME)
+# 押す・離す・キーの宛先 (remote.py) と、試験用の窓が受けた出来事を 1 つのファイルに書く。時々落ちる回を調べるため
+os.environ["WINTABDOCK_INPUT_LOG"] = os.environ["VNC_TESTAPP_LOG"] = str(HOME / "input.log")
 NOVNC_CACHE = Path(os.environ.get("LOCALAPPDATA", ".")) / "WinTabDock"
 if (NOVNC_CACHE / "novnc-1.6.0").exists():
     import shutil
@@ -47,6 +49,19 @@ def tk_get(dock: td.Dock, fn):
     box = []
     dock.call_in_tk(lambda: box.append(fn()))
     return box[0] if box else None
+
+
+def adopt_only_test_windows(dock: td.Dock) -> None:
+    """つないでいる間に開いた窓のうち、試験用の窓だけをタブにする。人がその間に開いた窓 (Cygwin のセットアップ・
+    エクスプローラー・ToolKeeper など) まで試験のドックに取り込み、選ばれたタブが変わって試験が時々落ちた"""
+    orig = dock.maybe_adopt_remote
+
+    def only_tests(hwnd: int) -> None:
+        if td.window_title(hwnd).startswith(("vnc-testapp ", "edit-testapp ")):
+            orig(hwnd)
+
+    dock.maybe_adopt_remote = only_tests
+
 
 
 def all_widgets(w) -> list:
@@ -406,6 +421,7 @@ def main() -> None:
     print("つなぎ方:", f"Wi-Fi ({LAN})" if LAN else "USB (adb reverse)")
     dock = td.Dock([], {"auto_adopt": False, "restore_session": False, "remote": {"host": LAN or "127.0.0.1"}})
     dock.root.geometry("900x600+150+120")
+    adopt_only_test_windows(dock)
     saved_clip = remote.clipboard_text()  # 試験でクリップボードを書き換えるので、文字なら最後に戻す
     threading.Thread(target=lambda: (time.sleep(1.0), steps(dock)), daemon=True).start()
     dock.root.mainloop()

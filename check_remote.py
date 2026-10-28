@@ -986,6 +986,18 @@ def shot(dock: td.Dock, name: str) -> None:
     Image.frombuffer("RGB", (w, h), data, "raw", "BGRX").save(OUT / name)
 
 
+def adopt_only_test_windows(dock: td.Dock) -> None:
+    """つないでいる間に開いた窓のうち、試験用の窓だけをタブにする。人がその間に開いた窓 (Cygwin のセットアップ・
+    エクスプローラー・ToolKeeper など) まで試験のドックに取り込み、選ばれたタブが変わって試験が時々落ちた"""
+    orig = dock.maybe_adopt_remote
+
+    def only_tests(hwnd: int) -> None:
+        if td.window_title(hwnd).startswith(("vnc-testapp ", "edit-testapp ")):
+            orig(hwnd)
+
+    dock.maybe_adopt_remote = only_tests
+
+
 def tk_get(dock: td.Dock, fn):
     """Tk のスレッドで fn を動かして値を受け取る (試験のスレッドから Tk に直接触らない)。"""
     box = []
@@ -1101,6 +1113,7 @@ def main() -> None:
         faulthandler.dump_traceback_later(int(os.environ["CHECK_REMOTE_DUMP"]), exit=True)
     dock = td.Dock([], {"auto_adopt": False, "restore_session": False, "remote": {"host": "127.0.0.1"}})
     dock.root.geometry("900x600+150+120")
+    adopt_only_test_windows(dock)
     if os.environ.get("CHECK_REMOTE_DUMP"):
         watch_tk(dock)
     saved_clip = remote.clipboard_text()  # 試験でクリップボードを書き換えるので、文字なら最後に戻す

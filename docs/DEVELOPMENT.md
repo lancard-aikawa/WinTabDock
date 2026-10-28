@@ -90,6 +90,15 @@ uv run check_remote_android.py   # Android の実機 (USB デバッグ) の Chro
 uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi で PC のこのアドレスにつなぐ (USB は試験の操作だけ。25 項目)
 ```
 
+- **試験のドックは、つないでいる間に開いた窓のうち試験用の窓 (`vnc-testapp`・`edit-testapp`) だけをタブにする**
+  (`adopt_only_test_windows`)。人がその間に開いた窓 (Cygwin のセットアップ・エクスプローラー・ToolKeeper など) まで
+  試験のドックに取り込み、選ばれたタブが変わって、Android の試験が 4 回に 1〜2 回、数項目から 12 項目落ちていた (2026-10-28)
+- Android の試験は `input.log` (試験の HOME の中) に、押す・離す・キーの宛先 (remote.py。`WINTABDOCK_INPUT_LOG`) と、
+  試験用の窓が受けた出来事 (`VNC_TESTAPP_LOG`) を時刻つきで書く。落ちた回の様子を追うため。取り込みを直したあと
+  8 回続けて通ったが、取り込みの無い回でも 2 回、文字が入力欄に入らず窓に届いたことがあり、まだ捕まえていない
+- スマホの Chrome はページを自動で翻訳し、キーの記録 (`?keylog`) の「send ド」が「ドを送信」に書き換わって試験が落ちた。
+  記録の箱に `translate="no"` と `notranslate` を付けた
+
 - **Wi-Fi でつなぐときは、Windows のファイアウォールで受信の許可が要る。** 初めて待ち受けるときに出る確認で許可を押さないと、
   Windows がその Python (exe) の受信を**ブロックする決まり**を自分で作り、以後は確認も出ない。ブロックは許可より強いので、
   許可を足すだけでは通らない。スマホのブラウザは「接続しています」や接続できないページのままになり、remote.log には
