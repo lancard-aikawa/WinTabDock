@@ -426,7 +426,6 @@ def steps(dock: td.Dock) -> None:
         launch_steps(dock, c, apps)
         maximize_steps(dock, apps)
         second_window_steps(dock, apps)
-        document_steps(dock, c, apps)
 
         c.close()
         c = None
@@ -752,68 +751,6 @@ def second_window_steps(dock: td.Dock, apps: list) -> None:
     check("タブにしていない、同じプロセスの普通の窓は、ドックの上へ移さず、スマホの画面にも重ねない",
           second not in layers and td.rect_of(second) == before and main in layers,
           f"重ねる窓 {layers} 窓の位置 {before} → {td.rect_of(second)}")
-
-
-def document_steps(dock: td.Dock, c: Client, apps: list) -> None:
-    """Mery のタブ: 文書ごとに別の窓で、切り替えると前の窓を隠して次の窓を出す。つないでいる間に切り替えたら、
-    次の文書の窓を別のタブにして、ツールが 2 つに分かれた (2026-10-29)。同じタブが次の窓を写すようにする"""
-    tag = f"r{os.getpid()}d"
-    os.environ["VNC_TESTAPP_DOCS"] = "1"
-    try:
-        app = ck.start_app(tag)
-    finally:
-        del os.environ["VNC_TESTAPP_DOCS"]
-    apps.append(app)
-    main = app[1]
-    for _ in range(50):
-        if dock.active and dock.active.hwnd == main:
-            break
-        time.sleep(0.1)
-    tab = dock.active
-    n = len(dock.tabs)
-
-    def doc2() -> int:
-        return next((h for h in [t.hwnd for t in dock.tabs] + td.top_windows()
-                     if td.window_title(h) == f"vnc-testapp {tag}-doc2"), 0)
-
-    def tap_and_wait(x: int, want, what: str, y: int = 110) -> bool:
-        _, tx, ty, _, _ = RemoteSource_layers(dock)[1]
-        c.tap(tx + x, ty + y)
-        for _ in range(40):
-            time.sleep(0.1)
-            if want():
-                return True
-        return False
-
-    ok = tap_and_wait(320, lambda: dock.active and dock.active.hwnd == doc2() != 0, "文書 2")
-    layers = RemoteSource_layers(dock)
-    check("文書ごとに別の窓のツール (Mery) で次の文書へ切り替えると、タブは増えず、同じタブが次の窓を写す",
-          ok and len(dock.tabs) == n and dock.active is tab and layers[1][0] == doc2(),
-          f"タブ {[t.name for t in dock.tabs]} 写す窓 {layers[1][0]} 文書 2 {doc2()}")
-    ok = tap_and_wait(320, lambda: dock.active and dock.active.hwnd == main, "文書 1")
-    check("前の文書へ戻すと、同じタブが前の窓を写す", ok and len(dock.tabs) == n and dock.active is tab,
-          f"タブ {[t.name for t in dock.tabs]} 写す窓 {dock.active.hwnd if dock.active else 0}")
-    again = tap_and_wait(320, lambda: dock.active and dock.active.hwnd == doc2() != 0, "文書 2")
-    closing = doc2()
-    ok = tap_and_wait(320, lambda: not td.user32.IsWindow(closing) and dock.active and dock.active.hwnd == main,
-                      "閉じる", y=190)
-    time.sleep(1.5)  # 窓が消えたタブを片付ける見回り (0.5 秒ごと) を待つ
-    log = [ln for ln in (HOME / "remote.log").read_text(encoding="utf-8").splitlines() if "窓が替わった" in ln]
-    check("写している文書を閉じて前の窓が出たら、タブはそちらを写す (タブを消さない)",
-          ok and any(t is tab for t in dock.tabs) and dock.active is tab and tab.hwnd == main,
-          f"タブ {[t.name for t in dock.tabs]} もう一度文書 2 {again} 文書 2 {td.user32.IsWindow(closing)} "
-          f"写す窓 {tab.hwnd} 文書 1 {main} 見える {td.user32.IsWindowVisible(main)} 記録 {log[-3:]}")
-    tap_and_wait(320, lambda: dock.active and dock.active.hwnd == doc2() != 0, "文書 2")  # 開き直す
-    dock.call_in_tk(lambda: dock.release(tab))
-    time.sleep(0.5)
-    shown, hidden = doc2(), main
-    s1 = td.user32.GetWindowLongPtrW(shown, td.GWL_STYLE)
-    s2 = td.user32.GetWindowLongPtrW(hidden, td.GWL_STYLE)
-    check("ドックから外すと、写していた窓は元の形 (タイトルの帯つき) で出て、ツールが隠した前の文書の窓は隠れたまま元の形に戻る",
-          shown != 0 and bool(td.user32.IsWindowVisible(shown)) and s1 & td.WS_CAPTION == td.WS_CAPTION
-          and not td.user32.IsWindowVisible(hidden) and s2 & td.WS_CAPTION == td.WS_CAPTION
-          and not td.user32.GetWindow(hidden, 4),
-          f"写していた窓 {hex(s1)} 前の窓 {hex(s2)} 見える {td.user32.IsWindowVisible(hidden)}")
 
 
 def panel_steps(dock: td.Dock, token: str) -> None:

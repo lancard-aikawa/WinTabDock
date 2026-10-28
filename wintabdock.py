@@ -30,7 +30,7 @@ import time
 import tkinter as tk
 import tomllib
 from ctypes import wintypes
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import qrcodegen  # QR コードを作る (Project Nayuki、MIT。1 ファイルを同梱)
@@ -44,7 +44,6 @@ kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
 GWL_STYLE, GWL_EXSTYLE, GWLP_HWNDPARENT = -16, -20, -8  # トップレベルの窓では HWNDPARENT が所有者
 WS_CAPTION, WS_THICKFRAME = 0x00C00000, 0x00040000
-WS_VISIBLE = 0x10000000
 WS_MINIMIZEBOX, WS_MAXIMIZEBOX, WS_SYSMENU = 0x00020000, 0x00010000, 0x00080000
 WS_EX_TOOLWINDOW, WS_EX_APPWINDOW = 0x00000080, 0x00040000
 SW_HIDE, SW_SHOWNOACTIVATE, SW_SHOW, SW_MAXIMIZE, SW_RESTORE = 0, 4, 5, 3, 9
@@ -132,12 +131,6 @@ def window_pid(hwnd: int) -> int:
 def window_title(hwnd: int) -> str:
     buf = ctypes.create_unicode_buffer(512)
     user32.GetWindowTextW(hwnd, buf, 512)
-    return buf.value
-
-
-def window_class(hwnd: int) -> str:
-    buf = ctypes.create_unicode_buffer(256)
-    user32.GetClassNameW(hwnd, buf, 256)
     return buf.value
 
 
@@ -264,9 +257,7 @@ STATE = state_path()  # このドックの控え
 def save_state(tabs: list["Tab"]) -> None:
     STATE.parent.mkdir(parents=True, exist_ok=True)
     STATE.write_text(json.dumps([{"hwnd": t.hwnd, "style": t.style, "exstyle": t.exstyle, "rect": t.rect,
-                                  "owner": t.owner, "maximized": t.maximized} for t in tabs]
-                                # 前に写していた文書の窓 (ツールが隠している。戻すときも隠したまま)
-                                + [dict(o, hidden=True) for t in tabs for o in t.others]), encoding="utf-8")
+                                  "owner": t.owner, "maximized": t.maximized} for t in tabs]), encoding="utf-8")
 
 
 def other_docks() -> list[int]:
@@ -275,18 +266,15 @@ def other_docks() -> list[int]:
 
 
 def restore_window(hwnd: int, style: int, exstyle: int, rect: tuple[int, int, int, int], owner: int = 0,
-                   maximized: bool = False, show: bool = True) -> None:
+                   maximized: bool = False) -> None:
     if not user32.IsWindow(hwnd):
         return
     user32.ShowWindow(hwnd, SW_HIDE)  # 拡張スタイルの変更をタスクバーに反映させるため、一度隠す
     user32.SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner)
-    # 控えたスタイルは見えていた時のもので WS_VISIBLE を含む。そのまま書くと、隠したまま戻したい窓が出てしまう
-    user32.SetWindowLongPtrW(hwnd, GWL_STYLE, style if show else style & ~WS_VISIBLE)
+    user32.SetWindowLongPtrW(hwnd, GWL_STYLE, style)
     user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, exstyle)
     x, y, w, h = rect
     user32.SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED)
-    if not show:  # ツールが隠している文書の窓 (Mery の裏のタブ)。出すとツールの見た目が崩れる
-        return
     user32.ShowWindow(hwnd, SW_MAXIMIZE if maximized else SW_SHOW)
     # 属性を元に戻して見せても、タスクバーがボタンを付け直さないことがある (自動で取り込んだ PortWho で、
     # ドックを閉じたあとタスクバーに出なかった)。所有者なし・WS_EX_TOOLWINDOW なしの窓だけ、明示的に足す
@@ -329,7 +317,7 @@ def _restore_file(path: Path) -> int:
     for s in json.loads(path.read_text(encoding="utf-8")):
         if user32.IsWindow(s["hwnd"]):
             restore_window(s["hwnd"], s["style"], s["exstyle"], tuple(s["rect"]), s.get("owner", 0),
-                           s.get("maximized", False), show=not s.get("hidden"))
+                           s.get("maximized", False))
             n += 1
     path.unlink()
     return n
@@ -367,9 +355,6 @@ class Tab:
     pid: int = 0  # 窓のプロセス。自動取り込みで、同じプロセスの 2 つ目の窓 (設定画面など) をタブにしないため
     maximized: bool = False  # 取り込む前に最大化していた (外すときに最大化に戻す)
     button_hwnd: int = 0  # タブのボタンの窓。遠隔から押してよい所か見分けるため (別のスレッドから Tk に触らない)
-    cls: str = ""  # 窓の種類。文書ごとに別の窓のツール (Mery) で、次の文書の窓を見分けるため
-    others: list = field(default_factory=list)  # 前に写していた文書の窓の元の状態 (ツールが隠している。外すときに戻す)
-    dead_since: float = 0.0  # 窓が消えた時刻。次の文書の窓が出るのを少し待ってからタブを消す
 
 
 class RemoteSource:
@@ -614,10 +599,6 @@ class Dock:
         self.root.after(150, self._drain_shown)
 
     def on_window_shown(self, hwnd: int) -> None:
-        tab = self.document_tab(hwnd)
-        if tab:
-            self.follow_document(tab, hwnd)
-            return
         if self.auto_adopt:
             self.maybe_adopt(hwnd)
         if self._remote_geometry:
@@ -757,14 +738,29 @@ class Dock:
     def adopt(self, name: str, hwnd: int) -> None:
         if any(t.hwnd == hwnd for t in self.tabs) or hwnd == self.hwnd:
             return
+        # 最大化した窓は、ドックが大きさと位置を決めても、画面いっぱいのまま動かない (VS Code の新しい窓は最大化して開く。
+        # 画面いっぱいのまま重なり、スマホでは帯ごと隠れた)。最大化を解いてから控え、外すときに最大化に戻す
+        maximized = False
+        for _ in range(2):  # 最大化してから最小化した窓は、1 回目で最大化に戻る
+            if not (user32.IsIconic(hwnd) or user32.IsZoomed(hwnd)):
+                break
+            maximized = maximized or bool(user32.IsZoomed(hwnd))
+            user32.ShowWindow(hwnd, SW_RESTORE)
+        maximized = maximized or bool(user32.IsZoomed(hwnd))
+        style = user32.GetWindowLongPtrW(hwnd, GWL_STYLE)
+        exstyle = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
         pid = window_pid(hwnd)
-        tab = Tab(name, hwnd, 0, 0, (0, 0, 0, 0), exe=os.path.normcase(process_path(pid)), pid=pid,
-                  cls=window_class(hwnd))
-        self._take_state(tab, hwnd)
+        tab = Tab(name, hwnd, style, exstyle, rect_of(hwnd), exe=os.path.normcase(process_path(pid)),
+                  owner=user32.GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT), pid=pid, maximized=maximized)
         self.tabs.append(tab)
         save_state(self.tabs)  # 変える前に控える
         user32.ShowWindow(hwnd, SW_HIDE)
-        self._dock_window(tab)
+        # 所有者をドックにする。前面の奪い合いで重なり順を直す作りでは、ドックを押した瞬間 (移動・リサイズ・
+        # ボタン) に本体が真っ暗になり、他のアプリの後ろにも回った。所有される窓は Windows が所有者より手前に置く
+        user32.SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, self.hwnd)
+        user32.SetWindowLongPtrW(hwnd, GWL_STYLE, style & ~(WS_CAPTION | WS_THICKFRAME))
+        user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (exstyle | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW)
+        user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED)
         tab.button = tk.Button(self.tabs_frame, text=name, relief=tk.FLAT, padx=12,
                                command=lambda t=tab: self.select(t))
         tab.button.bind("<Button-2>", lambda e, t=tab: self.close_tab(t))  # 中クリックでツールを閉じる
@@ -774,78 +770,8 @@ class Dock:
         self.empty.place_forget()
         self.select(tab)
 
-    @staticmethod
-    def _take_state(tab: Tab, hwnd: int) -> None:
-        """窓の元の状態を控える (外すときに戻す)。"""
-        # 最大化した窓は、ドックが大きさと位置を決めても、画面いっぱいのまま動かない (VS Code の新しい窓は最大化して開く。
-        # 画面いっぱいのまま重なり、スマホでは帯ごと隠れた)。最大化を解いてから控え、外すときに最大化に戻す
-        maximized = False
-        for _ in range(2):  # 最大化してから最小化した窓は、1 回目で最大化に戻る
-            if not (user32.IsIconic(hwnd) or user32.IsZoomed(hwnd)):
-                break
-            maximized = maximized or bool(user32.IsZoomed(hwnd))
-            user32.ShowWindow(hwnd, SW_RESTORE)
-        tab.hwnd = hwnd
-        tab.maximized = maximized or bool(user32.IsZoomed(hwnd))
-        tab.style = user32.GetWindowLongPtrW(hwnd, GWL_STYLE)
-        tab.exstyle = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
-        tab.rect = rect_of(hwnd)
-        tab.owner = user32.GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT)
-
-    def _dock_window(self, tab: Tab) -> None:
-        hwnd = tab.hwnd
-        # 所有者をドックにする。前面の奪い合いで重なり順を直す作りでは、ドックを押した瞬間 (移動・リサイズ・
-        # ボタン) に本体が真っ暗になり、他のアプリの後ろにも回った。所有される窓は Windows が所有者より手前に置く
-        user32.SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, self.hwnd)
-        user32.SetWindowLongPtrW(hwnd, GWL_STYLE, tab.style & ~(WS_CAPTION | WS_THICKFRAME))
-        user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (tab.exstyle | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW)
-        user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED)
-
-    def document_tab(self, hwnd: int) -> Tab | None:
-        """hwnd が、タブにしているツールの次の文書の窓ならそのタブ。Mery は文書ごとに別の窓 (同じプロセス・同じ種類) で、
-        切り替えると前の窓を隠して次の窓を出す。写している窓が隠れたか消えたときだけ (VS Code の 2 つ目の窓は、
-        1 つ目も見えたままなので別のタブにする)"""
-        if (any(t.hwnd == hwnd for t in self.tabs) or not user32.IsWindowVisible(hwnd)
-                or self.launch_panel or self.root.state() == "iconic"):
-            return None
-        pid, cls = window_pid(hwnd), window_class(hwnd)
-        for t in self.tabs:
-            # 前に写していた窓は、ドックが形を変えたまま (所有者つき・帯なし) なので、普通の窓には見えない
-            if t.pid != pid or t.cls != cls or not (is_app_window(hwnd) or any(o["hwnd"] == hwnd for o in t.others)):
-                continue
-            if not user32.IsWindow(t.hwnd) or (t is self.active and not user32.IsWindowVisible(t.hwnd)):
-                return t
-        return None
-
-    def follow_document(self, tab: Tab, hwnd: int) -> None:
-        """タブが写す窓を、ツールが出した次の文書の窓に替える。前の窓は (ツールが隠したまま) 外すときに戻す。"""
-        old = tab.hwnd
-        if user32.IsWindow(old):
-            tab.others.append({"hwnd": old, "style": tab.style, "exstyle": tab.exstyle, "rect": tab.rect,
-                               "owner": tab.owner, "maximized": tab.maximized})
-        tab.others = [o for o in tab.others if user32.IsWindow(o["hwnd"])]
-        seen = next((o for o in tab.others if o["hwnd"] == hwnd), None)
-        if seen:  # 前に写していた窓に戻った。控えてある元の状態を使う (いまの状態は、ドックが変えたもの)
-            tab.others.remove(seen)
-            tab.hwnd, tab.style, tab.exstyle = hwnd, seen["style"], seen["exstyle"]
-            tab.rect, tab.owner, tab.maximized = tuple(seen["rect"]), seen["owner"], seen["maximized"]
-        else:
-            self._take_state(tab, hwnd)
-        tab.dead_since = 0.0
-        save_state(self.tabs)
-        self._dock_window(tab)
-        self.remote_log(f"「{tab.name}」の窓が替わった (文書の切り替え) ので、同じタブで写す: {window_title(hwnd)}")
-        if tab is self.active:
-            self.place_active(show=True)
-        else:
-            user32.ShowWindow(hwnd, SW_HIDE)
-
     def release(self, tab: Tab) -> None:
         self.ignored.add(tab.hwnd)  # 元に戻すと窓が現れるので、自動取り込みがすぐ取り込み直してしまう
-        for o in tab.others:  # 前に写していた文書の窓は、ツールが隠したまま形だけ戻す
-            self.ignored.add(o["hwnd"])
-            restore_window(o["hwnd"], o["style"], o["exstyle"], tuple(o["rect"]), o["owner"], o["maximized"],
-                           show=False)
         restore_window(tab.hwnd, tab.style, tab.exstyle, tab.rect, tab.owner, tab.maximized)
         self.forget(tab)
 
@@ -926,10 +852,7 @@ class Dock:
     def poll(self) -> None:
         for t in list(self.tabs):
             if not user32.IsWindow(t.hwnd):
-                # 文書を閉じたツール (Mery) は、前の文書の窓を出す。それを写すのを少し待ってから消す
-                t.dead_since = t.dead_since or time.monotonic()
-                if time.monotonic() - t.dead_since > 1.5:
-                    self.forget(t)
+                self.forget(t)
         if (self.active and user32.IsZoomed(self.active.hwnd) and self.root.state() != "iconic"
                 and not self.launch_panel):  # 一覧を開いている間は隠している (置き直すと出てしまう)
             self.remote_log(f"「{self.active.name}」が最大化したので、解いてドックに収め直した")
