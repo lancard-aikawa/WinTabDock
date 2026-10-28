@@ -143,6 +143,14 @@ def steps(dock: td.Dock) -> None:
         time.sleep(1.0)
         alive = bool(dock.remote_server and dock.remote_server.peers())
         ck.check("絵文字を打てて、接続が切れない", "text=abc日本語🍦 " in title and alive, f"{title} 接続 {alive}")
+        # カタカナと「ー」「。」は、noVNC が X の古いカナの keysym で送ってくる。文字に戻せず、カタカナに変換すると消えた
+        for comp in ("に", "にほ", "にほん"):
+            tab.call("Input.imeSetComposition", text=comp, selectionStart=len(comp), selectionEnd=len(comp))
+            time.sleep(0.1)
+        tab.call("Input.insertText", text="ニホンー。")
+        title = ck.wait_title(h1, "text=abc日本語🍦ニホンー。 ")
+        ck.check("カタカナに変換した字と「ー」「。」を打てる", "text=abc日本語🍦ニホンー。 " in title,
+                 f"{title} / 届いたキー {' '.join(keys[-12:])}")
         va.screenshot("dock-2-typed")
         tab.js("document.getElementById('noVNC_keyboardinput').blur()")
         time.sleep(1.0)

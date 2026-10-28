@@ -30,6 +30,8 @@ from ctypes import wintypes
 from pathlib import Path
 from typing import Callable, Protocol
 
+from keysyms import KEYSYM_TO_CODEPOINT
+
 DEFAULT_PORT = 15900  # LPortMan の台帳に登録
 NOVNC_VERSION = "1.6.0"
 NOVNC_URL = f"https://github.com/novnc/noVNC/archive/refs/tags/v{NOVNC_VERSION}.tar.gz"
@@ -470,7 +472,8 @@ def keysym_char(keysym: int) -> str | None:
         return chr(keysym)
     if keysym & 0xFF000000 == 0x01000000:  # Unicode の keysym (noVNC はスマホの日本語の確定文字をこれで送る)
         return chr(keysym & 0xFFFFFF)
-    return None
+    cp = KEYSYM_TO_CODEPOINT.get(keysym)  # カタカナ・「。」「ー」などは X の古い keysym で届く (ニ = 0x04C6)
+    return chr(cp) if cp else None
 
 
 # ── 通り道 (WebSocket) ────────────────────────────────────────────────────────

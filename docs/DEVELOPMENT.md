@@ -85,9 +85,9 @@ uv run check_close.py PortWho RepoTether         # × を押したとき: 一緒
 「設定」の「スマホから使う」で入り切りする (入れたかは settings.json の `remote` に覚え、次の起動でも始める)。
 
 ```sh
-uv run check_remote.py           # ドックに試験用の窓を 3 つ取り込み、noVNC と同じ WebSocket でつなぐ。設定の画面と QR コード、つないでいる間の知らせの窓、表示倍率、絵文字・日本語の変換 (Tk と、Tk でない EDIT の窓) も (45 項目)
-uv run check_remote_android.py   # Android の実機 (USB デバッグ) の Chrome から (13 項目)
-uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi で PC のこのアドレスにつなぐ (USB は試験の操作だけ。14 項目)
+uv run check_remote.py           # ドックに試験用の窓を 3 つ取り込み、noVNC と同じ WebSocket でつなぐ。設定の画面と QR コード、つないでいる間の知らせの窓、表示倍率、絵文字・日本語の変換・カタカナ (Tk と、Tk でない EDIT の窓) も (46 項目)
+uv run check_remote_android.py   # Android の実機 (USB デバッグ) の Chrome から (14 項目)
+uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi で PC のこのアドレスにつなぐ (USB は試験の操作だけ。15 項目)
 ```
 
 - **Wi-Fi でつなぐときは、Windows のファイアウォールで受信の許可が要る。** 初めて待ち受けるときに出る確認で許可を押さないと、
@@ -219,6 +219,12 @@ uv run experiments/vnc_android_check.py                       # Android の実�
     Mery で Enter・Tab・BackSpace・←・Delete が 1 回ずつ効くことも確かめた
   - 試験の速さでは、「abc」の直後 (0 秒) に変換を始めると、noVNC 自身が最初の「に」を 2 回送ってきた (人の手では間があく)。
     スマホの試験は 0.5 秒あける
+- **カタカナに変換すると消えた** (ユーザーの報告、2026-10-28)。noVNC は打った字を `keysyms.lookup` で keysym にするが、その表
+  (core/input/keysymdef.js) にある字は Unicode の keysym (0x01000000 + 番号) でなく X の古い keysym で送ってくる。カタカナ
+  (ニ = 0x04C6。濁点つきの「ガ」などは表に無く Unicode のまま)・「。」「、」「ー」「「」」・ギリシャ文字・キリル文字など 659 字。
+  受け側が Unicode の keysym しか字に戻さず捨てていたので、BackSpace で消した変換中のひらがなの代わりが届かなかった。漢字と
+  ひらがなは表に無いので出なかった。表を逆向きにした `keysyms.py` (noVNC の版を上げたら作り直す) で字に戻す。実機で直す前は
+  BackSpace×3 の後に 0x4c6 0x4ce 0x4dd 0x4b0 0x4a1 が届いて消え (13/14)、直した後は「ニホンー。」になった
 - **前に開いた noVNC のタブが古い合言葉でつなぎ直し続けると、新しいタブの接続が 20 秒以上待たされた。** 断られた接続が続くと、
   Chrome が同じ相手への WebSocket を待たせる。合言葉を作り直したら、古いタブは閉じる。試験は決め打ちで待たず、つながるまで待つ
 - 画面のキーボードを出すと、その分だけブラウザの中が狭くなる (画面写真では下の端がキーボードに隠れた)。大きさを頼み直すかは未確認

@@ -237,6 +237,13 @@ def steps(dock: td.Dock) -> None:
         title = ck.wait_title(h1, "text=okあ🍦🍦日本 ")
         check("日本語の入力の変換 (変換中の文字を BackSpace で消してから確定の文字) が、その順に届く",
               "text=okあ🍦🍦日本 " in title, title)
+        # カタカナと「ー」「。」は、noVNC の表で X の古いカナの keysym (ニ = 0x04c6) になって届く。
+        # Unicode の keysym しか文字に戻していなかったので捨てられ、カタカナに変換すると消えた
+        for ks in (0x0100306B, 0x0100307B, 0x01003093, 0xFF08, 0xFF08, 0xFF08, 0x04C6, 0x04CE, 0x04DD, 0x04B0, 0x04A1):
+            c.key(ks)
+        title = ck.wait_title(h1, "text=okあ🍦🍦日本ニホンー。 ")
+        check("カタカナに変換した字と「ー」「。」(noVNC は X のカナの keysym で送る) も届く",
+              "text=okあ🍦🍦日本ニホンー。 " in title, title)
 
         mapped = tk_get(dock, lambda: (dock.menu_button.winfo_ismapped(), dock.settings_button.winfo_ismapped(),
                                        dock.zoom_out_button.winfo_ismapped(), dock.zoom_in_button.winfo_ismapped()))
@@ -482,6 +489,7 @@ def edit_steps(dock: td.Dock, c, edit_app) -> None:
     seq = [ord("a"), ord("b"), ord("c"), 0xFF0D,
            0x0100306B, 0x0100307B, 0x01003093, 0x01003054, 0xFF08, 0xFF08, 0xFF08, 0xFF08,  # に ほ ん ご → 消す
            0x010065E5, 0x0100672C, 0x01008A9E, 0x0100D83C, 0x0100DF66,  # 日 本 語 🍦 (代理対の片方ずつ)
+           0x0100306B, 0x0100307B, 0xFF08, 0xFF08, 0x04C6, 0x04CE, 0x04B0,  # に ほ → カタカナの ニ ホ ー
            0xFF09, ord("x"), 0xFF08, 0xFF51, 0xFFFF]  # Tab x BackSpace ← Delete (Tab も消える)
     for ks in seq:
         c.key(ks)
@@ -490,8 +498,8 @@ def edit_steps(dock: td.Dock, c, edit_app) -> None:
     n = td.user32.SendMessageW(edit, 0x000E, 0, 0)  # WM_GETTEXTLENGTH
     buf = ctypes.create_unicode_buffer(n + 1)
     ctypes.windll.user32.SendMessageW(edit, 0x000D, n + 1, buf)  # WM_GETTEXT
-    want = "abc\r\n日本語🍦"
-    check("Tk でない窓 (EDIT) にも、日本語の変換・絵文字・Enter・Tab・BackSpace・矢印・Delete が送った順に効く",
+    want = "abc\r\n日本語🍦ニホー"
+    check("Tk でない窓 (EDIT) にも、日本語の変換・カタカナ・絵文字・Enter・Tab・BackSpace・矢印・Delete が送った順に効く",
           buf.value == want, f"{buf.value!r} / 期待 {want!r}")
 
 

@@ -113,3 +113,5 @@ MIT
 
 QR コードを作る部分に、Project Nayuki の [QR Code generator library](https://www.nayuki.io/page/qr-code-generator-library)
 (`qrcodegen.py`、MIT) を同梱しています。
+
+`keysyms.py` は、noVNC の `core/input/keysymdef.js` (X.Org の keysymdef.h から作られた表) を逆向きにした対応表です。
