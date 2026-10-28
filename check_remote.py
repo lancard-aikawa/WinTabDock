@@ -322,8 +322,10 @@ def steps(dock: td.Dock) -> None:
         check("Tk のツールでも Shift+Home で選べ、Shift を離すと普通に打てる", "text=z " in title, title)
 
         mapped = tk_get(dock, lambda: (dock.menu_button.winfo_ismapped(), dock.settings_button.winfo_ismapped(),
-                                       dock.zoom_out_button.winfo_ismapped(), dock.zoom_in_button.winfo_ismapped()))
-        check("つないでいる間は、帯の「+ 起動」「設定」の代わりに表示倍率のボタンが出る", mapped == (0, 0, 1, 1), str(mapped))
+                                       dock.open_button.winfo_ismapped(), dock.zoom_out_button.winfo_ismapped(),
+                                       dock.zoom_in_button.winfo_ismapped()))
+        check("つないでいる間は、帯の「+ 起動」「設定」の代わりに「+ 開く」と表示倍率のボタンが出る",
+              mapped == (0, 0, 1, 1, 1), str(mapped))
         # 押せない所 (倍率の表示) は、押しても何も起きず、ドックも止まらない
         label_x, label_y = button_pos(dock, tk_get(dock, dock.zoom_label.winfo_id))
         menus_before = len(our_menus())
@@ -417,6 +419,7 @@ def steps(dock: td.Dock) -> None:
         check("つないでいる間に開いた別のアプリの窓は、タブになって選ばれ、遠隔の画面に出る",
               bool(dock.active) and dock.active.hwnd == later[1] and layer[0] == later[1] and layer[1] >= 0,
               f"選んでいるタブ {dock.active and dock.active.name} {layer}")
+        launch_steps(dock, c, apps)
 
         c.close()
         c = None
@@ -462,6 +465,84 @@ def steps(dock: td.Dock) -> None:
         ck.close_apps([(app1, h1), (app2, h2), edit_app] + apps)
         dock.call_in_tk(dock.stop_remote)
         dock.call_in_tk(dock.quit, wait=False)
+
+
+def launch_steps(dock: td.Dock, c: Client, apps: list) -> None:
+    """スマホの「+ 開く」: ドックの中にツールの一覧を出し、起動・戻る・選んでいるツールを閉じる。"""
+    launched: list[str] = []
+    dock.launch = lambda tool, new=False: launched.append(tool["name"])  # 試験では起動しない (押されたかだけ見る)
+    dock.tools = [{"name": "fake", "exe": r"C:\nonexistent\fake.exe"}]
+
+    def panel_buttons() -> dict[str, int]:
+        return tk_get(dock, lambda: {w.cget("text"): w.winfo_id() for w in all_widgets(dock.launch_panel)
+                                     if isinstance(w, td.tk.Button)} if dock.launch_panel else {})
+
+    def open_panel() -> dict[str, int]:
+        c.tap(*button_pos(dock, tk_get(dock, dock.open_button.winfo_id)))
+        time.sleep(1.0)
+        return panel_buttons()
+
+    def shown() -> int:  # 遠隔の画面に写しているツール (無ければ 0)
+        layers = RemoteSource_layers(dock)
+        return layers[1][0] if len(layers) > 1 else 0
+
+    try:
+        active = dock.active
+        buttons = open_panel()
+        img = c.full_frame()
+        img.save(OUT / "remote-3-launch.png")
+        names = [t.name + (" (表示中)" if t is active else "") for t in dock.tabs]
+        check("「+ 開く」で、ドックの中にツールの一覧 (開いているツール・起動する・戻る・閉じる) が出て、選んでいたツールは隠れる",
+              set(buttons) == {*names, "起動: fake", "戻る", f"「{active.name}」を閉じる"} and shown() == 0,
+              f"{list(buttons)} 写しているツール {shown()}")
+        # 帯の右端のボタンは、タブが多くても切れない (タブが 4 つで「+ 拡大」が切れていた)
+        right = td.rect_of(tk_get(dock, dock.zoom_in_button.winfo_id))
+        ox = remote.client_origin(dock.dock_hwnd)[0]
+        check("タブが多くても、帯の「+ 拡大」はドックの中に収まる",
+              right[0] + right[2] <= ox + remote.client_size(dock.dock_hwnd)[0], f"{right} ドックの左 {ox}")
+        c.tap(*button_pos(dock, buttons["起動: fake"]))
+        time.sleep(1.0)
+        check("一覧の「起動: …」を押すとそのツールを開き、一覧が消えて元のツールが写る",
+              launched == ["fake"] and dock.launch_panel is None and shown() == active.hwnd,
+              f"開いた {launched} 一覧 {dock.launch_panel} 写しているツール {shown()}")
+        buttons = open_panel()
+        c.tap(*button_pos(dock, buttons["戻る"]))
+        time.sleep(1.0)
+        check("「戻る」で一覧が消え、元のツールが写る", dock.launch_panel is None and shown() == active.hwnd,
+              f"一覧 {dock.launch_panel} 写しているツール {shown()}")
+        buttons = open_panel()
+        c.tap(*button_pos(dock, buttons[dock.tabs[1].name]))
+        time.sleep(1.0)
+        check("一覧の「開いているツール」を押すと、そのツールに切り替わる",
+              dock.launch_panel is None and dock.active is dock.tabs[1] and shown() == dock.tabs[1].hwnd,
+              f"一覧 {dock.launch_panel} 写しているツール {shown()}")
+        open_panel()
+        c.tap(*button_pos(dock, dock.tabs[0].button_hwnd))
+        time.sleep(1.0)
+        check("一覧を開いたまま帯のタブを押すと、一覧が消えてそのタブのツールが写る",
+              dock.launch_panel is None and dock.active is dock.tabs[0] and shown() == dock.tabs[0].hwnd,
+              f"一覧 {dock.launch_panel} 写しているツール {shown()}")
+        # 選んでいるツールを閉じる (つないでいる間に開いた窓はタブになって選ばれる)
+        doomed = ck.start_app(f"r{os.getpid()}f")
+        apps.append(doomed)
+        for _ in range(50):
+            if dock.active and dock.active.hwnd == doomed[1]:
+                break
+            time.sleep(0.1)
+        buttons = open_panel()
+        name = dock.active.name if dock.active else "-"
+        c.tap(*button_pos(dock, buttons.get(f"「{name}」を閉じる", 0)))
+        for _ in range(50):
+            if not td.user32.IsWindow(doomed[1]) and all(t.hwnd != doomed[1] for t in dock.tabs):
+                break
+            time.sleep(0.1)
+        check("一覧の「「…」を閉じる」で、選んでいるツールが閉じてタブも消え、ほかのタブのツールが写る",
+              not td.user32.IsWindow(doomed[1]) and all(t.hwnd != doomed[1] for t in dock.tabs)
+              and dock.launch_panel is None and shown() not in (0, doomed[1]),
+              f"窓 {td.user32.IsWindow(doomed[1])} タブ {[t.name for t in dock.tabs]} 写しているツール {shown()}")
+    finally:
+        del dock.launch
+        dock.tools = []
 
 
 def panel_steps(dock: td.Dock, token: str) -> None:
@@ -805,8 +886,9 @@ def record_keys(dock: td.Dock) -> list[str]:
 
 def old_zoom_buttons(img) -> int:
     """67% の画面で、帯の中ほど (100% のときの倍率のボタンがあった所) の明るい画素の数。
-    描き直しが遅れると、前の絵 (「− 縮小 100% + 拡大」) がここに残る。正しく描けていれば帯の地だけで 0"""
-    return sum(1 for p in img.crop((150, 2, 280, 22)).convert("L").getdata() if p > 90)
+    描き直しが遅れると、前の絵 (「+ 開く − 縮小 100% + 拡大」) がここに残る。正しく描けていれば帯の地だけで 0
+    (67% の「+ 開く」は 250 より右にある)"""
+    return sum(1 for p in img.crop((110, 2, 245, 22)).convert("L").get_flattened_data() if p > 90)
 
 
 def is_light(img) -> bool:

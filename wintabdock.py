@@ -369,8 +369,15 @@ class RemoteSource:
         w, h = remote.client_size(d)
         out = [(d, 0, 0, w, h)]
         a = self._active()
+        popups = tool_popups(a, {t.hwnd for t in self.dock.tabs} | {d}) if a else []
+        # 写していないツール (別のタブ・「+ 開く」の一覧で隠したツール) の小窓は、ドックの上に移していたら元の位置に戻す。
+        # 写さないのにドックに重なっていて、その下のボタンが押せなかった (Tk は押した所に別の窓があると押されない)。
+        # 選ばれたら下でまた移す
+        for hwnd in [h for h in list(self.dock.remote_moved) if h not in popups]:
+            if user32.IsWindow(hwnd) and user32.IsWindowVisible(hwnd):
+                x, y = self.dock.remote_moved.pop(hwnd)
+                user32.SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
         if a:
-            popups = tool_popups(a, {t.hwnd for t in self.dock.tabs} | {d})
             if self.dock._remote_geometry:  # つないでいる間 (ドックが画面の外にある間) だけ
                 for hwnd in popups:
                     self._bring_in(hwnd, ox, oy, w, h)
@@ -404,9 +411,10 @@ class RemoteSource:
     def click_allowed(self, top: int, child: int, mask: int) -> bool:
         if top != self.dock.dock_hwnd:
             return True
-        # ドックで押せるのはタブと表示倍率のボタン (左ボタン) だけ。「+ 起動」「設定」やタブの右クリックはメニューを出し、
-        # メニューは別の窓なので遠隔からは見えず、開いている間ドックが止まる
-        return mask & 7 == 1 and child in {t.button_hwnd for t in self.dock.tabs} | self.dock.zoom_hwnds
+        # ドックで押せるのはタブと帯のボタン (「+ 開く」と表示倍率) と、「+ 開く」の一覧のボタン (左ボタン) だけ。
+        # 「+ 起動」「設定」やタブの右クリックはメニューを出し、メニューは別の窓なので遠隔からは見えず、開いている間ドックが止まる
+        allowed = {t.button_hwnd for t in self.dock.tabs} | self.dock.zoom_hwnds | self.dock.launch_hwnds
+        return mask & 7 == 1 and child in allowed
 
     def connected(self, on: bool) -> None:
         self.dock.call_in_tk(lambda: self.dock.remote_connected(on), wait=False)
@@ -475,6 +483,8 @@ class Dock:
         self._remote_notice: tk.Toplevel | None = None  # つないでいる間、PC の画面に出す知らせ
         self._remote_geometry: str | None = None  # 遠隔からつないでいる間 (ドックを画面の外に置く間) の、元の大きさ・位置
         self.remote_moved: dict[int, tuple[int, int]] = {}  # つないでいる間にドックの上へ移したツールの小窓 → 元の位置
+        self.launch_panel: tk.Frame | None = None  # スマホの「+ 開く」で、ドックの中に出すツールの一覧
+        self.launch_hwnds: set[int] = set()  # その一覧のボタン (遠隔から押してよい)
         self._tk_calls: queue.SimpleQueue = queue.SimpleQueue()  # 別のスレッドから Tk で動かしてほしいこと
         self.dock_hwnd = 0
         self._closing = False
@@ -507,13 +517,20 @@ class Dock:
         self.zoom_frame = tk.Frame(self.bar, bg=BAR_BG)
         zoom_button = {"bg": TAB_BG, "fg": TAB_FG, "relief": tk.FLAT, "activebackground": TAB_ACTIVE,
                        "disabledforeground": "#55557a", "padx": 8, "cursor": "hand2"}
+        # 「+ 起動」はメニュー (別の窓) を出すので遠隔からは使えない。代わりにドックの中に一覧を出す。
+        # 選んでいるタブ (紫の塗り) と並ぶので、塗りでなく「設定」と同じ紫の枠で見分ける (塗りにしたら、タブとつながって見えた)
+        open_frame = tk.Frame(self.zoom_frame, bg=BAR_EDGE, padx=1, pady=1)
+        open_frame.pack(side=tk.LEFT, padx=(8, 8), pady=4)
+        self.open_button = tk.Button(open_frame, text="+ 開く", command=self.toggle_launch_panel, bd=0,
+                                     **{**zoom_button, "bg": BAR_BG})
+        self.open_button.pack()
         self.zoom_out_button = tk.Button(self.zoom_frame, text="− 縮小", command=lambda: self.change_zoom(-1), **zoom_button)
         self.zoom_out_button.pack(side=tk.LEFT, pady=4)
         self.zoom_label = tk.Label(self.zoom_frame, bg=BAR_BG, fg=TAB_FG_DIM, width=5)  # 今の倍率 (押せない表示)
         self.zoom_label.pack(side=tk.LEFT)
         self.zoom_in_button = tk.Button(self.zoom_frame, text="+ 拡大", command=lambda: self.change_zoom(1), **zoom_button)
         self.zoom_in_button.pack(side=tk.LEFT, padx=(0, 8), pady=4)
-        self.zoom_hwnds = {self.zoom_out_button.winfo_id(), self.zoom_in_button.winfo_id()}
+        self.zoom_hwnds = {self.open_button.winfo_id(), self.zoom_out_button.winfo_id(), self.zoom_in_button.winfo_id()}
         self.show_zoom()
         # タブの帯と、取り込んだツールの窓の境目。ツールの上端にも帯と似た見た目 (タブや「設定」) があると、
         # どこまでがドックか分かりにくかった
@@ -754,6 +771,7 @@ class Dock:
 
     # ── 表示 ──
     def select(self, tab: Tab) -> None:
+        self.close_launch_panel(show=False)  # 一覧を開いたままタブを押した
         for t in self.tabs:
             on = t is tab
             t.button.configure(bg=TAB_ACTIVE if on else TAB_BG, fg=TAB_FG if on else TAB_FG_DIM,
@@ -1198,7 +1216,9 @@ class Dock:
             self.menu_button.pack_forget()
             self.settings_frame.pack_forget()
             self.show_zoom()
-            self.zoom_frame.pack(side=tk.RIGHT)
+            # タブより先に場所を取る (タブが多いと、後から並べた帯の右端のボタンが切れて押せなかった)
+            self.zoom_frame.pack(side=tk.RIGHT, before=self.tabs_frame)
+            self.empty.config(text="右上の「+ 開く」からツールを開きます")
             x = user32.GetSystemMetrics(76) + user32.GetSystemMetrics(78) + 100  # 仮想画面の右端の外
             self.root.geometry(f"+{x}+{user32.GetSystemMetrics(77)}")
             threading.Thread(target=self._keep_tk_awake, daemon=True).start()
@@ -1209,6 +1229,8 @@ class Dock:
                 self._remote_notice.destroy()
             self._remote_notice = None
             geometry, self._remote_geometry = self._remote_geometry, None
+            self.close_launch_panel(show=False)  # 下で選んでいるツールを出し直す
+            self.empty.config(text="右上の「+ 起動 / 取り込む」からツールを開きます")
             self.zoom_frame.pack_forget()
             self.pack_bar_buttons()
             self.root.maxsize(*self._remote_maxsize)
@@ -1248,6 +1270,67 @@ class Dock:
         self.zoom_label.config(text=f"{round(z * 100)}%")
         self.zoom_out_button.config(state=tk.DISABLED if z == self.ZOOMS[0] else tk.NORMAL)
         self.zoom_in_button.config(state=tk.DISABLED if z == self.ZOOMS[-1] else tk.NORMAL)
+
+    def toggle_launch_panel(self) -> None:
+        if self.launch_panel:
+            self.close_launch_panel()
+        else:
+            self.open_launch_panel()
+
+    def open_launch_panel(self) -> None:
+        """スマホの「+ 開く」: ツールの起動・切り替えと、選んでいるツールを閉じるボタンを、ドックの中に並べる。
+        ツールの窓はドックより手前にあるので、開いている間は隠す (遠隔の画面にも写らない)"""
+        if self.active:
+            user32.ShowWindow(self.active.hwnd, SW_HIDE)
+        panel = tk.Frame(self.body, bg="#0d0d1a", padx=16, pady=12)
+        panel.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.launch_panel = panel
+        button = {"relief": tk.FLAT, "fg": TAB_FG, "font": ("", 11), "anchor": tk.W, "padx": 12, "pady": 8,
+                  "cursor": "hand2"}
+        buttons = []
+
+        def add(text: str, action, bg: str = TAB_BG, active_bg: str = TAB_ACTIVE, top: int = 0) -> None:
+            # 押した時の処理は Tk に後でやってもらう。起動は窓が出るまで待つので、遠隔の「離した」が返ってこなくなる。
+            # 一覧を消して選んでいたツールを出し直してから動かす (起動に失敗しても、隠したままにならない)
+            b = tk.Button(panel, text=text, bg=bg, activebackground=active_bg, activeforeground=TAB_FG,
+                          command=lambda: self.root.after(0, lambda: (self.close_launch_panel(), action())),
+                          **button)
+            b.pack(fill=tk.X, pady=(top, 6))
+            buttons.append(b)
+
+        def heading(text: str, top: int = 0) -> None:  # 押せない見出し (枠も塗りも無い小さな文字)
+            tk.Label(panel, text=text, bg="#0d0d1a", fg=TAB_FG_DIM, anchor=tk.W).pack(fill=tk.X, pady=(top, 6))
+
+        if self.tabs:
+            # スマホの幅では帯にタブが並びきらず、右のタブが切れる。ここからも切り替えられるようにする
+            heading("開いているツール")
+            for t in self.tabs:
+                on = t is self.active  # 帯のタブと同じく、表示中は紫で塗る
+                add(f"{t.name} (表示中)" if on else t.name, lambda t=t: self.select(t), bg=TAB_ACTIVE if on else TAB_BG,
+                    active_bg="#6d28d9" if on else TAB_ACTIVE)
+        heading("起動する", top=12 if self.tabs else 0)
+        closed = [tool for tool in self.tools if not self.tab_of_exe(tool["exe"])]
+        for tool in closed:
+            add(f"起動: {tool['name']}", lambda t=tool: self.launch(t))
+        if not closed:
+            heading("登録したツールはすべて開いています" if self.tools
+                    else "登録したツールがありません (wintabdock.toml の [[tools]])")
+        add("戻る", lambda: None, top=12)
+        tab = self.active
+        if tab:
+            # 閉じるのは取り返しがつかないので、一番下にほかと離して置き、色も変える
+            add(f"「{tab.name}」を閉じる", lambda: self.close_tab(tab), bg="#4a1d2e", active_bg="#7f1d1d", top=24)
+        self.launch_hwnds = {b.winfo_id() for b in buttons}
+
+    def close_launch_panel(self, show: bool = True) -> None:
+        """「+ 開く」の一覧を消す。show なら隠していたツールを出し直す (ツールを選び直すときは、選ぶ側が出す)"""
+        if not self.launch_panel:
+            return
+        self.launch_panel.destroy()
+        self.launch_panel = None
+        self.launch_hwnds = set()
+        if show:
+            self.place_active(show=True)
 
     def pack_bar_buttons(self) -> None:
         """帯の右端に「設定」と「+ 起動 / 取り込む」を置く (side=RIGHT は先に置いたものほど右に並ぶ)。"""

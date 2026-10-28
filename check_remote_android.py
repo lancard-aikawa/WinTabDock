@@ -49,6 +49,13 @@ def tk_get(dock: td.Dock, fn):
     return box[0] if box else None
 
 
+def all_widgets(w) -> list:
+    out = [w]
+    for c in w.winfo_children():
+        out += all_widgets(c)
+    return out
+
+
 def record_keys(dock: td.Dock) -> list[str]:
     """スマホから届いたキー (押した分) を控える。落ちたときに、noVNC が何を送ってきたかを出すため。"""
     keys: list[str] = []
@@ -324,6 +331,20 @@ def steps(dock: td.Dock) -> None:
             time.sleep(1.5)
         size = remote.client_size(dock.dock_hwnd)
         ck.check("「+ 拡大」で 100% に戻る", dock.remote_zoom == 1.0 and size == (vw, vh), f"倍率 {dock.remote_zoom} ドック {size}")
+
+        # 「+ 開く」でドックの中にツールの一覧が出て、「戻る」で元のツールに戻る
+        tab.tap(*dock_button_pos(dock, dock.open_button))
+        time.sleep(1.5)
+        va.screenshot("dock-2b-launch")
+        back = tk_get(dock, lambda: next((w for w in all_widgets(dock.launch_panel) if isinstance(w, td.tk.Button)
+                                          and w.cget("text") == "戻る"), None) if dock.launch_panel else None)
+        opened = back is not None and not td.RemoteSource(dock)._active()
+        if back is not None:
+            tab.tap(*dock_button_pos(dock, back))
+            time.sleep(1.5)
+        ck.check("「+ 開く」のタップでツールの一覧が出て、「戻る」のタップで元のツールに戻る",
+                 opened and dock.launch_panel is None and td.RemoteSource(dock)._active() == h1,
+                 f"一覧が出た {opened} 一覧 {dock.launch_panel} 写しているツール {td.RemoteSource(dock)._active()}")
 
         # タブ (app2) を押す。ドックの帯の中の位置 (縮めていない画面)
         bx, by, bw, bh = td.rect_of(dock.tabs[1].button_hwnd)
