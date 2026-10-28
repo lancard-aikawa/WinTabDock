@@ -266,6 +266,35 @@ def steps(dock: td.Dock) -> None:
         ck.check("URL に keylog を付けると、キーと入力欄の出来事、PC へ送ったキーが画面に出る",
                  "keydown key=\"Enter\"" in keylog and "send ド\n" in keylog and "send ド down" not in keylog,
                  keylog[-300:].replace("\n", " | "))
+        # noVNC の帯の「Ctrl」(押したままにする切り替え) を入れてから s を打つ。入力欄の Ctrl+S (ツールの割り当て) が効く
+        tab.js("document.getElementById('noVNC_toggle_ctrl_button').click()")
+        time.sleep(0.3)
+        tab.call("Input.insertText", text="s")
+        time.sleep(0.3)
+        tab.js("document.getElementById('noVNC_toggle_ctrl_button').click()")
+        title = ck.wait_title(h1, "[S] ")
+        ck.check("noVNC の「Ctrl」を入れて打つと、ツールに Ctrl+S が効く", "text=abc日本語🍦ニホンー。サンドマン[S] " in title,
+                 f"{title} / 届いたキー {' '.join(keys[-6:])}")
+        # noVNC のクリップボードの欄 (帯の「クリップボード」) に入れた文字が PC のクリップボードに入り、PC で写した文字が欄に出る
+        phone = "スマホから🍦\n2 行目"
+        tab.js(f"(() => {{ const t = document.getElementById('noVNC_clipboard_text'); t.value = {phone!r};"
+               " t.dispatchEvent(new Event('change')); })()")
+        pc = None
+        for _ in range(30):
+            pc = remote.clipboard_text()
+            if pc == phone.replace("\n", "\r\n"):
+                break
+            time.sleep(0.1)
+        ck.check("noVNC のクリップボードの欄の文字 (日本語・絵文字・改行) が、PC のクリップボードに入る",
+                 pc == phone.replace("\n", "\r\n"), repr(pc))
+        remote.set_clipboard_text("PC で写した 📋")
+        shown = None
+        for _ in range(30):
+            shown = tab.js("document.getElementById('noVNC_clipboard_text').value")
+            if shown == "PC で写した 📋":
+                break
+            time.sleep(0.1)
+        ck.check("PC で写した文字が、noVNC のクリップボードの欄に出る", shown == "PC で写した 📋", repr(shown))
         va.screenshot("dock-2-typed")
         tab.js("document.getElementById('noVNC_keyboardinput').blur()")
         time.sleep(1.0)
@@ -351,8 +380,11 @@ def main() -> None:
     print("つなぎ方:", f"Wi-Fi ({LAN})" if LAN else "USB (adb reverse)")
     dock = td.Dock([], {"auto_adopt": False, "restore_session": False, "remote": {"host": LAN or "127.0.0.1"}})
     dock.root.geometry("900x600+150+120")
+    saved_clip = remote.clipboard_text()  # 試験でクリップボードを書き換えるので、文字なら最後に戻す
     threading.Thread(target=lambda: (time.sleep(1.0), steps(dock)), daemon=True).start()
     dock.root.mainloop()
+    if saved_clip is not None:
+        remote.set_clipboard_text(saved_clip)
     ng = [r for r in ck.results if not r[1]]
     print(f"\n{len(ck.results) - len(ng)}/{len(ck.results)} OK")
     sys.exit(1 if ng else 0)

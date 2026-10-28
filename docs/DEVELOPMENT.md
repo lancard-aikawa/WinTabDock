@@ -85,9 +85,9 @@ uv run check_close.py PortWho RepoTether         # × を押したとき: 一緒
 「設定」の「スマホから使う」で入り切りする (入れたかは settings.json の `remote` に覚え、次の起動でも始める)。
 
 ```sh
-uv run check_remote.py           # ドックに試験用の窓を 3 つ取り込み、noVNC と同じ WebSocket でつなぐ。設定の画面と QR コード、つないでいる間の知らせの窓、表示倍率、絵文字・日本語の変換・カタカナ (Tk と、Tk でない EDIT の窓)、ツールが開くメニューと小窓、つないでいる間に開いた外のアプリの窓も (59 項目。人の WinTabDock が Wi-Fi で待ち受けていると 55)
-uv run check_remote_android.py   # Android の実機 (USB デバッグ) の Chrome から。メニューと小窓、iPad の日本語の入力の並び、キーの記録も (19 項目)
-uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi で PC のこのアドレスにつなぐ (USB は試験の操作だけ。20 項目)
+uv run check_remote.py           # ドックに試験用の窓を 3 つ取り込み、noVNC と同じ WebSocket でつなぐ。設定の画面と QR コード、つないでいる間の知らせの窓、表示倍率、絵文字・日本語の変換・カタカナ (Tk と、Tk でない EDIT の窓)、ツールが開くメニューと小窓、つないでいる間に開いた外のアプリの窓、Ctrl・Shift (Tk と EDIT)、クリップボードも (68 項目。人の WinTabDock が Wi-Fi で待ち受けていると 64)
+uv run check_remote_android.py   # Android の実機 (USB デバッグ) の Chrome から。メニューと小窓、iPad の日本語の入力の並び、キーの記録、noVNC の「Ctrl」とクリップボードの欄も (22 項目)
+uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi で PC のこのアドレスにつなぐ (USB は試験の操作だけ。23 項目)
 ```
 
 - **Wi-Fi でつなぐときは、Windows のファイアウォールで受信の許可が要る。** 初めて待ち受けるときに出る確認で許可を押さないと、
@@ -308,7 +308,21 @@ uv run experiments/vnc_android_check.py                       # Android の実�
 - **打つ (Tk)**: Tk は、自分の窓が前面でないと文字を捨てる。押すたびに `WM_ACTIVATE` と `WM_SETFOCUS` を送ると受け付ける
   (本物の前面・フォーカスは動かさない)。文字は `WM_CHAR` で送る。noVNC はスマホの日本語の確定文字を Unicode の keysym
   (`0x01000000 | 文字コード`) で送ってくるので、そのまま `WM_CHAR` にできる (日本語の「あ」で確かめた。スマホの実機は未確認)
-- **修飾キー** (Ctrl・Shift・Alt) は窓へのメッセージでは効かない (相手は本物のキーボードの状態を読む)。未対応
+- **修飾キー** (Ctrl・Shift・Alt) は窓へのメッセージでは効かない (相手は押しているかを入力の状態 `GetKeyState` で読む)。
+  `AttachThreadInput` で共有して `SetKeyboardState` で押した状態にする。**書いた状態は、`AttachThreadInput` を呼ぶと消える**
+  (共有をやめた時にも消える。最初は書いてすぐ共有をやめ、Ctrl も Shift も効かなかった)。押している間は専用のスレッド
+  (`ModifierHold`) が共有したまま待ち、押す・動かすの共有 (これでも消える) の後に書き直す
+- **Ctrl・Alt を押している間のキー**は、`SendMessage` で渡すと、ショートカットの表 (`TranslateAccelerator`。Mery の Ctrl+S など) も、
+  キーから文字への翻訳 (EDIT 部品は Ctrl+C を `WM_CHAR(3)` で受けて写す) も通らない。相手の受け取りの列に置く (`PostMessage`)。
+  文字の keysym (`s`) は `VkKeyScanW` で仮想キー (`S`) にする。列に置いたキーは後で読まれるので、Ctrl を離した時は
+  0.1 秒待ち、`WM_NULL` を渡して戻るのを待ってから状態を消す。試験用の窓 (`edit_testapp.py`・`vnc_testapp.py`) に Ctrl+S の割り当てがある
+- **クリップボード**: noVNC は拡張クリップボード (疑似符号 `0xC0A1E5CE`) を使う。サーバが「できること」(Caps) を送ると、
+  noVNC は欄の文字が変わった時に「変わった」(Notify) を送ってくる。「頼む」(Request) を返すと、中身 (Provide。zlib で縮めた
+  長さ + UTF-8 + `\0`) が来る。noVNC は Provide を毎回新しい zlib で `Z_FULL_FLUSH` で送り、終わりの印を付けない
+  (`decompressobj` で読む)。PC の側は `GetClipboardSequenceNumber` を 0.5 秒ごとに見て、変わったら Provide を送る。
+  Caps の印には Provide や Request の印も立っているので、先に Caps かを見る (試験のクライアントで中身として読んで失敗した)。
+  `OpenClipboard(NULL)` で空けると持ち主が無くなり `SetClipboardData` が失敗するので、使い捨てのメッセージ専用の窓を持ち主にする。
+  ブラウザ (スマホ) の本物のクリップボードには届かない (HTTP のページは `navigator.clipboard` を使えない)。noVNC の欄を介する
 - **Chromium (Edge のアプリ窓で確かめた。WebView2 の RepoTether は未確認)**: 画面の上なら、押す・打つ・大きさの変更が効いた。
   画面の外では描くのを止め、灰色が写り、ページの大きさも変わらなかった。起動時に
   `--disable-features=CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows` を付けると、画面の外でも効いた。

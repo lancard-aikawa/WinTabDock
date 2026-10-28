@@ -5,6 +5,7 @@
 タイトルは "edit-testapp <目印>"。中の文字は外から WM_GETTEXT で読める。標準ライブラリだけ。
 上の帯 (高さ BAR_H) を押すと、Mery のメニューの帯と同じく、押した時に TrackPopupMenu でメニューを出す。
 「XYZ を挿入」は文字を足し、「その他」の下の「SUB を挿入」も文字を足す (メニューを遠隔から選べたかを中の文字で見る)。
+Ctrl+S は、Mery などと同じくショートカットの表 (TranslateAccelerator) で受けて、"[S]" を足す。
 「検索...」は、Mery の検索と同じく、この窓が持ち主の小窓 (タイトル "edit-testapp-find"、中に EDIT) を、画面の中に
 収めて出す (この窓が画面の外にあれば、画面の右端へ寄せる)
 """
@@ -40,9 +41,13 @@ u.EndPaint.argtypes = [wintypes.HWND, ctypes.c_void_p]
 u.TextOutW = ctypes.windll.gdi32.TextOutW
 u.TextOutW.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int, wintypes.LPCWSTR, ctypes.c_int]
 k.GetModuleHandleW.restype = wintypes.HMODULE
+u.CreateAcceleratorTableW.restype = wintypes.HANDLE
+u.CreateAcceleratorTableW.argtypes = [ctypes.c_void_p, ctypes.c_int]
+u.TranslateAcceleratorW.argtypes = [wintypes.HWND, wintypes.HANDLE, ctypes.POINTER(wintypes.MSG)]
 
 WM_DESTROY, WM_SIZE, WM_SETFOCUS, WM_PAINT = 0x0002, 0x0005, 0x0007, 0x000F
-WM_LBUTTONDOWN = 0x0201
+WM_LBUTTONDOWN, WM_COMMAND = 0x0201, 0x0111
+FVIRTKEY, FCONTROL = 0x01, 0x08
 EM_REPLACESEL = 0x00C2
 WS_OVERLAPPEDWINDOW, WS_VISIBLE, WS_CHILD, WS_VSCROLL = 0x00CF0000, 0x10000000, 0x40000000, 0x00200000
 ES_MULTILINE, ES_AUTOVSCROLL, ES_WANTRETURN = 0x0004, 0x0040, 0x1000
@@ -50,9 +55,13 @@ MF_STRING, MF_POPUP = 0x0000, 0x0010
 TPM_RETURNCMD = 0x0100
 WS_POPUP, WS_CAPTION, WS_SYSMENU, WS_BORDER = 0x80000000, 0x00C00000, 0x00080000, 0x00800000
 BAR_H = 28
-ID_XYZ, ID_SUB, ID_FIND = 101, 102, 103
+ID_XYZ, ID_SUB, ID_FIND, ID_SAVE = 101, 102, 103, 104
 u.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
 u.SystemParametersInfoW.argtypes = [wintypes.UINT, wintypes.UINT, ctypes.c_void_p, wintypes.UINT]
+
+
+class ACCEL(ctypes.Structure):
+    _fields_ = [("fVirt", wintypes.BYTE), ("key", wintypes.WORD), ("cmd", wintypes.WORD)]
 
 
 class WNDCLASSW(ctypes.Structure):
@@ -119,6 +128,10 @@ def main() -> None:
             else:
                 u.SetFocus(edit[0])
             return 0
+        if msg == WM_COMMAND and wp & 0xFFFF == ID_SAVE:
+            text = ctypes.create_unicode_buffer("[S]")
+            u.SendMessageW(edit[0], EM_REPLACESEL, 1, ctypes.addressof(text))
+            return 0
         if msg == WM_DESTROY:
             u.PostQuitMessage(0)
             return 0
@@ -135,8 +148,11 @@ def main() -> None:
     edit[0] = u.CreateWindowExW(0, "EDIT", "", WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL
                                 | ES_WANTRETURN, 0, BAR_H, 480, 330, top, None, inst, None)
     u.SetFocus(edit[0])
+    accel = u.CreateAcceleratorTableW(ctypes.byref(ACCEL(FVIRTKEY | FCONTROL, ord("S"), ID_SAVE)), 1)
     msg = wintypes.MSG()
     while u.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+        if u.TranslateAcceleratorW(top, accel, ctypes.byref(msg)):
+            continue
         u.TranslateMessage(ctypes.byref(msg))
         u.DispatchMessageW(ctypes.byref(msg))
 

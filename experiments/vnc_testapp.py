@@ -49,6 +49,7 @@ entry = tk.Entry(root, textvariable=text, font=("", 16))
 entry.place(x=60, y=170, width=300, height=40)
 text.trace_add("write", update_title)
 root.bind("<Configure>", update_title)
+entry.bind("<Control-s>", lambda e: (text.set(text.get() + "[S]"), entry.icursor("end"), "break")[-1])  # Ctrl を遠隔から
 for seq in ("<ButtonPress>", "<ButtonRelease>", "<Enter>", "<Leave>", "<KeyPress>", "<FocusIn>"):
     root.bind_all(seq, note, add="+")
 update_title()

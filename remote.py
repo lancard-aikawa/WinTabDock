@@ -6,6 +6,7 @@
 - 撮る: PrintWindow で窓ごとに描かせ (隠れていても画面の外でも撮れる)、GDI で 1 枚に重ねる (縮めるのも GDI)
 - 送る: 変わった行の帯だけ、zlib で縮めて送る (VNC の Zlib 符号)
 - 押す・打つ: 窓へのメッセージで送る。手元のマウスとキーボードは動かさない
+- 写す・貼る: PC のクリップボードの文字を noVNC のクリップボードの欄と行き来させる (拡張クリップボード。UTF-8)
 - 入れるのは、URL の合言葉 (token) が合い、Origin が自分の配ったページのものだけ
 """
 
@@ -16,6 +17,7 @@ import ctypes
 import hashlib
 import io
 import mimetypes
+import queue
 import re
 import secrets
 import socket
@@ -64,6 +66,8 @@ _u.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
 _u.FillRect.argtypes = [wintypes.HDC, ctypes.POINTER(wintypes.RECT), wintypes.HBRUSH]
 _u.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
 _u.MapVirtualKeyW.argtypes = [wintypes.UINT, wintypes.UINT]
+_u.VkKeyScanW.argtypes = [wintypes.WCHAR]
+_u.VkKeyScanW.restype = ctypes.c_short
 _u.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
                             wintypes.UINT]
 _u.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
@@ -89,6 +93,24 @@ gdi32.StretchBlt.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_
 gdi32.BitBlt.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
                          wintypes.HDC, ctypes.c_int, ctypes.c_int, wintypes.DWORD]
 
+kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+kernel32.GlobalLock.restype = ctypes.c_void_p
+kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+kernel32.GlobalFree.argtypes = [wintypes.HGLOBAL]
+_u.OpenClipboard.argtypes = [wintypes.HWND]
+_u.GetClipboardData.argtypes = [wintypes.UINT]
+_u.GetClipboardData.restype = wintypes.HANDLE
+_u.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+_u.SetClipboardData.restype = wintypes.HANDLE
+_u.GetClipboardSequenceNumber.restype = wintypes.DWORD
+_u.CreateWindowExW.argtypes = [wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_int,
+                               ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.HWND, wintypes.HMENU,
+                               wintypes.HINSTANCE, wintypes.LPVOID]
+_u.CreateWindowExW.restype = wintypes.HWND
+_u.DestroyWindow.argtypes = [wintypes.HWND]
+
 PW_CLIENTONLY, PW_RENDERFULLCONTENT = 0x1, 0x2
 SRCCOPY, HALFTONE = 0x00CC0020, 4
 CWP_SKIPINVISIBLE, CWP_SKIPTRANSPARENT = 0x1, 0x4
@@ -98,7 +120,8 @@ SMTO_ABORTIFHUNG = 0x0002
 # 固まった相手は SMTO_ABORTIFHUNG ですぐ諦めるので、長く待つのは「忙しいが動いている」相手だけ
 SEND_TIMEOUT_MS = 5000
 WM_ACTIVATE, WA_ACTIVE, WM_SETFOCUS = 0x0006, 1, 0x0007
-WM_KEYDOWN, WM_KEYUP, WM_CHAR, WM_UNICHAR = 0x0100, 0x0101, 0x0102, 0x0109
+WM_NULL, WM_KEYDOWN, WM_KEYUP, WM_CHAR, WM_UNICHAR = 0x0000, 0x0100, 0x0101, 0x0102, 0x0109
+WM_SYSKEYDOWN, WM_SYSKEYUP = 0x0104, 0x0105
 WM_MOUSEMOVE, WM_MOUSEWHEEL = 0x0200, 0x020A
 # メニューの窓 (#32768) へのメッセージ (文書には無いが、Windows 自身がメニューの窓に使う)。項目の番号を渡す
 MN_GETHMENU, MN_SELECTITEM, MN_CANCELMENUS, MN_BUTTONDOWN, MN_BUTTONUP = 0x01E1, 0x01E5, 0x01E6, 0x01ED, 0x01EF
@@ -433,6 +456,9 @@ class WindowInput:
         self.high_surrogate = 0  # 絵文字の代理対の前半 (後半が来るまで控える)
         self.send_failures: list = []  # 渡せなかったもの (メッセージ, 値, GetLastError)
         self.menu_press = False  # メニューの上で押した (離した時に項目を選ぶ)
+        self.mods: set[int] = set()  # 押している修飾キーの keysym (Shift_L・Control_L など)
+        self.hold = ModifierHold()
+        self.combo_posted = False  # 修飾キーを押している間に、キーを列に置いた
 
     def pointer(self, mask: int, x: int, y: int) -> None:
         with self.lock:
@@ -482,6 +508,7 @@ class WindowInput:
                 self.blocked = False
             return
         mk = sum(BUTTON_MSGS[b][2] for b in BUTTON_MSGS if mask & b)
+        mk |= (0x0004 if 0x10 in self.mod_vks() else 0) | (0x0008 if 0x11 in self.mod_vks() else 0)  # MK_SHIFT・MK_CONTROL
         msgs = [(WM_MOUSEMOVE, mk, lparam_xy(cx, cy))]
         for bit, (down, up, _) in BUTTON_MSGS.items():
             if mask & bit and not self.buttons & bit:
@@ -506,6 +533,7 @@ class WindowInput:
                 _u.GetKeyboardState(state)
                 for bit, vk in ((1, 0x01), (2, 0x04), (4, 0x02)):  # VK_LBUTTON / VK_MBUTTON / VK_RBUTTON
                     state[vk] = 0x80 if mask & bit else 0
+                write_mods(state, self.mod_vks())  # 共有した時に消えている (Ctrl+クリック)
                 _u.SetKeyboardState(state)
             menu_opened = False
             for msg, wp, lp in msgs:
@@ -518,6 +546,8 @@ class WindowInput:
         finally:
             if attached:
                 _u.AttachThreadInput(me, tid, False)
+                if self.mods:
+                    self.hold.reapply()  # 共有をやめた時に、押している Ctrl なども消えた
         if pressing and not menu_opened:
             _u.SendMessageTimeoutW(top, WM_ACTIVATE, WA_ACTIVE, 0, SMTO_ABORTIFHUNG, SEND_TIMEOUT_MS, None)
             _u.SendMessageTimeoutW(child, WM_SETFOCUS, 0, 0, SMTO_ABORTIFHUNG, SEND_TIMEOUT_MS, None)
@@ -604,17 +634,23 @@ class WindowInput:
         top = self.view.source.key_window()
         if (vk is None and ch is None) or not top:
             return
+        if vk in MODIFIER_VKS:
+            self._modifier(top, keysym, down)
+            return
         menus = Menus.find(top)
         if menus:
             # メニューを開いている間、ツールはメニューの処理の中で受け取りの列からキーを読む (SendMessage では届かない)。
             # 一番上の段の窓に置く (下の段の窓に置いても効かなかった)。↓ ↑ → ← Enter Esc と、項目の頭文字
-            if vk and vk not in (0x10, 0x11, 0x12):
+            if vk:
                 lp = 1 | _u.MapVirtualKeyW(vk, 0) << 16
                 _u.PostMessageW(menus[0], WM_KEYDOWN if down else WM_KEYUP, vk, lp if down else lp | 0xC0000000)
             elif ch and down:
                 _u.PostMessageW(menus[0], WM_CHAR, ord(ch), 1)
             return
         dest = focus_of(top) or self.key_child or top
+        if self.mod_vks() & {0x11, 0x12}:
+            self._post_combo(dest, vk or _u.VkKeyScanW(ch) & 0xFF, down)  # Ctrl+S の s は仮想キーの S にする
+            return
 
         # 打つものは、相手の受け取りの列に置かず (PostMessage)、1 つずつ渡して処理し終えるのを待つ (SendMessage)。
         # 列に置くと順番が崩れた。BackSpace の WM_KEYDOWN は、相手が受け取って翻訳した時に WM_CHAR(8) が列の後ろに作られ、
@@ -626,8 +662,6 @@ class WindowInput:
                 self.send_failures = self.send_failures[-19:] + [(hex(msg), hex(wp), ctypes.get_last_error())]
 
         if vk:
-            if vk in (0x10, 0x11, 0x12):
-                return  # 修飾キーは窓へのメッセージでは効かない (相手は本物のキーボードの状態を読む)
             lp = 1 | _u.MapVirtualKeyW(vk, 0) << 16
             send(WM_KEYDOWN if down else WM_KEYUP, vk, lp if down else lp | 0xC0000000)
             if down and vk in CHAR_KEYS and not is_tk(dest):
@@ -655,6 +689,101 @@ class WindowInput:
                 # WM_CHAR は UTF-16 の 1 単位ずつ。代理対の 2 つに分けて渡す (Windows 自身もそうする。Mery で確かめた)
                 send(WM_CHAR, 0xD800 | (cp - 0x10000) >> 10, 1)
                 send(WM_CHAR, 0xDC00 | (cp - 0x10000) & 0x3FF, 1)
+
+    def mod_vks(self) -> set[int]:
+        return {SPECIAL_KEYS[k] for k in self.mods}
+
+    def _modifier(self, top: int, keysym: int, down: bool) -> None:
+        """Shift・Ctrl・Alt。窓へのメッセージにはせず (相手は押しているかをキーボードの状態で見る)、相手のスレッドの
+        入力の状態に書き込む。離した時は、押している間に列に置いたキーを相手が処理し終えるのを待ってから消す
+        (先に消すと、Ctrl+S が ただの S になる)"""
+        if down:
+            self.mods.add(keysym)
+        else:
+            self.mods.discard(keysym)
+            if self.combo_posted and not self.mod_vks() & {0x11, 0x12}:
+                self.combo_posted = False
+                time.sleep(0.1)
+                dest = focus_of(top) or top
+                _u.SendMessageTimeoutW(dest, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, SEND_TIMEOUT_MS, None)
+        self.hold.set(_u.GetWindowThreadProcessId(top, None), self.mod_vks())
+
+    def _post_combo(self, dest: int, vk: int, down: bool) -> None:
+        """Ctrl か Alt を押している間のキー。相手の受け取りの列に置く (SendMessage で渡すと、ツールのショートカットの表
+        (TranslateAccelerator) も、キーから文字への翻訳 (Ctrl+C → WM_CHAR(3)。EDIT 部品はこれで写す) も通らない)"""
+        if vk == 0xFF:
+            return  # この配列のキーボードでは打てない文字
+        alt = self.mod_vks() & {0x11, 0x12} == {0x12}  # Alt だけ (Ctrl+Alt は AltGr として普通のキー)
+        lp = 1 | _u.MapVirtualKeyW(vk, 0) << 16 | (1 << 29 if alt else 0) | (0 if down else 0xC0000000)
+        msg = (WM_SYSKEYDOWN if down else WM_SYSKEYUP) if alt else (WM_KEYDOWN if down else WM_KEYUP)
+        _u.PostMessageW(dest, msg, vk, lp)
+        self.combo_posted = True
+
+    def release_keys(self) -> None:
+        """切れた時。押したままの修飾キーを離したことにする (相手のツールで Ctrl が押されたままになる)。"""
+        self.mods.clear()
+        self.hold.set(0, set())
+
+
+def write_mods(state, vks: set[int]) -> None:
+    """キーボードの状態 (256 バイト) の Shift・Ctrl・Alt を、vks に入っているものだけ押した状態にする。"""
+    for vk, sides in MODIFIER_VKS.items():
+        for v in (vk, *sides):
+            state[v] = 0x80 if vk in vks else 0
+
+
+class ModifierHold:
+    """修飾キーを押している間、相手のスレッドと入力の状態を共有し続けるスレッド。
+
+    書き込んだキーの状態は、共有をやめると消える (AttachThreadInput を呼ぶと、キーの状態は戻る)。押している間に列に
+    置いたキーを相手が後で読むので、離すまで共有したままにする。押す・動かすの共有 (WindowInput._pointer) でも消えるので、
+    その後で書き直す"""
+
+    def __init__(self) -> None:
+        self.q: queue.Queue = queue.Queue()
+        self.tid = 0
+        self.vks: set[int] = set()
+
+    def set(self, tid: int, vks: set[int]) -> None:
+        """tid のスレッドで vks を押した状態にする。空なら共有をやめる。書き込み終わるまで待つ"""
+        if self.tid and (tid != self.tid or not vks):
+            self._call("stop")
+            self.tid = 0
+        self.vks = set(vks)
+        if not vks or not tid:
+            return
+        if not self.tid:
+            self.tid = tid
+            threading.Thread(target=self._run, args=(tid,), daemon=True).start()
+        self._call("set")
+
+    def reapply(self) -> None:
+        if self.tid:
+            self._call("set")
+
+    def _call(self, cmd: str) -> None:
+        done = threading.Event()
+        self.q.put((cmd, set(self.vks), done))
+        done.wait(2)
+
+    def _run(self, tid: int) -> None:
+        me = kernel32.GetCurrentThreadId()
+        attached = _u.AttachThreadInput(me, tid, True)
+        try:
+            while True:
+                cmd, vks, done = self.q.get()
+                if cmd == "stop":
+                    done.set()
+                    return
+                if attached:
+                    state = (ctypes.c_ubyte * 256)()
+                    _u.GetKeyboardState(state)
+                    write_mods(state, vks)
+                    _u.SetKeyboardState(state)
+                done.set()
+        finally:
+            if attached:
+                _u.AttachThreadInput(me, tid, False)
 
 
 def child_at(hwnd: int, x: int, y: int) -> tuple[int, int, int]:
@@ -684,6 +813,7 @@ SPECIAL_KEYS = {  # X11 の keysym → 仮想キー
 }
 
 
+MODIFIER_VKS = {0x10: (0xA0, 0xA1), 0x11: (0xA2, 0xA3), 0x12: (0xA4, 0xA5)}  # Shift・Ctrl・Alt と、その左右
 CHAR_KEYS = {0x08, 0x09, 0x0D, 0x1B}  # 文字を生む仮想キー (BackSpace・Tab・Enter・Esc)。文字の値は仮想キーと同じ
 
 
@@ -701,6 +831,57 @@ def keysym_char(keysym: int) -> str | None:
         return chr(keysym & 0xFFFFFF)
     cp = KEYSYM_TO_CODEPOINT.get(keysym)  # カタカナ・「。」「ー」などは X の古い keysym で届く (ニ = 0x04C6)
     return chr(cp) if cp else None
+
+
+# ── クリップボード ────────────────────────────────────────────────────────────
+
+CF_UNICODETEXT, GMEM_MOVEABLE = 13, 0x0002
+CLIPBOARD_MAX = 1 << 20  # やり取りする文字の上限 (バイト)
+
+
+def clipboard_text() -> str | None:
+    """PC のクリップボードの文字。文字でないか、ほかのアプリが開いていて読めなければ None。"""
+    if not _u.OpenClipboard(None):
+        return None
+    try:
+        h = _u.GetClipboardData(CF_UNICODETEXT)
+        ptr = kernel32.GlobalLock(h) if h else None
+        if not ptr:
+            return None
+        try:
+            return ctypes.wstring_at(ptr)
+        finally:
+            kernel32.GlobalUnlock(h)
+    finally:
+        _u.CloseClipboard()
+
+
+def set_clipboard_text(text: str) -> bool:
+    """PC のクリップボードを文字にする。持ち主の窓が要る (持ち主なしで空けると SetClipboardData が失敗する) ので、
+    このスレッドに使い捨ての窓 (メッセージ専用) を作る"""
+    owner = _u.CreateWindowExW(0, "STATIC", None, 0, 0, 0, 0, 0, wintypes.HWND(-3), None, None, None)  # HWND_MESSAGE
+    try:
+        for _ in range(10):  # ほかのアプリが開いていることがある
+            if _u.OpenClipboard(owner):
+                break
+            time.sleep(0.05)
+        else:
+            return False
+        try:
+            _u.EmptyClipboard()
+            data = text.encode("utf-16-le") + b"\0\0"
+            h = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+            ptr = kernel32.GlobalLock(h)
+            ctypes.memmove(ptr, data, len(data))
+            kernel32.GlobalUnlock(h)
+            if not _u.SetClipboardData(CF_UNICODETEXT, h):
+                kernel32.GlobalFree(h)
+                return False
+            return True
+        finally:
+            _u.CloseClipboard()
+    finally:
+        _u.DestroyWindow(owner)
 
 
 # ── 通り道 (WebSocket) ────────────────────────────────────────────────────────
@@ -761,6 +942,10 @@ class WebSocketStream:
 
 ENC_RAW, ENC_ZLIB = 0, 6
 PSEUDO_DESKTOP_SIZE, PSEUDO_EXT_DESKTOP_SIZE = -223, -308
+PSEUDO_EXT_CLIPBOARD = -1063131698  # 0xC0A1E5CE
+# 拡張クリップボードの印 (上の 8 ビットが何をするか、下の 16 ビットが形式。形式は文字だけ使う)
+CLIP_TEXT = 1
+CLIP_CAPS, CLIP_REQUEST, CLIP_PEEK, CLIP_NOTIFY, CLIP_PROVIDE = (1 << b for b in range(24, 29))
 
 
 class Session:
@@ -782,6 +967,7 @@ class Session:
         self.announce = False
         self.closed = False
         self.zlib = zlib.compressobj(6)
+        self.ext_clipboard = False  # 拡張クリップボード (UTF-8) を使える相手
 
     def run(self) -> None:
         try:
@@ -837,6 +1023,12 @@ class Session:
                         self.announce = True  # noVNC はこれを一度受けてから大きさを頼んでくる
                         self.cond.notify_all()
                 self.encodings = encs
+                if PSEUDO_EXT_CLIPBOARD in encs and not self.ext_clipboard:
+                    self.ext_clipboard = True
+                    # できることを知らせる (文字を、知らせる・頼む・渡す)。noVNC はこれを受けてから拡張の形で送ってくる
+                    self._send_clip(CLIP_CAPS | CLIP_REQUEST | CLIP_PEEK | CLIP_NOTIFY | CLIP_PROVIDE | CLIP_TEXT,
+                                    struct.pack(">I", CLIPBOARD_MAX))
+                    self.server.clipboard_to(self, clipboard_text())
             elif t == 3:  # FramebufferUpdateRequest
                 inc = r(9)[0]
                 with self.cond:
@@ -848,9 +1040,12 @@ class Session:
             elif t == 5:  # PointerEvent
                 mask, x, y = struct.unpack(">BHH", r(5))
                 self._input(self.view.input.pointer, mask, x, y)
-            elif t == 6:  # ClientCutText (読み捨てる)
+            elif t == 6:  # ClientCutText
                 n = struct.unpack(">3xi", r(7))[0]
-                r(abs(n))
+                if abs(n) > CLIPBOARD_MAX + 64:
+                    raise Closed(f"クリップボードが大きすぎる ({abs(n)} バイト)")
+                body = r(abs(n))
+                self._input(self._client_clipboard, n < 0, body)
             elif t == 251:  # SetDesktopSize
                 w, h, n = struct.unpack(">xHHBx", r(7))
                 r(16 * n)
@@ -868,6 +1063,39 @@ class Session:
                     self.cond.notify_all()
             else:
                 raise Closed(f"知らないメッセージ {t}")
+
+    def _client_clipboard(self, extended: bool, body: bytes) -> None:
+        """スマホの側のクリップボード (noVNC のクリップボードの欄)。文字を受けたら PC のクリップボードに入れる。"""
+        if not extended:
+            self.server.clipboard_from(self, body.decode("latin-1"))  # 拡張でない形は Latin-1 だけ
+            return
+        flags = struct.unpack(">I", body[:4])[0]
+        if flags & CLIP_CAPS:
+            return  # 相手のできること (noVNC は全部できる)
+        if flags & CLIP_NOTIFY and flags & CLIP_TEXT:
+            self._send_clip(CLIP_REQUEST | CLIP_TEXT)  # 「変わった」の知らせ。中身を頼む
+        elif flags & CLIP_REQUEST:
+            self.server.clipboard_to(self, clipboard_text())
+        elif flags & CLIP_PEEK:
+            self._send_clip(CLIP_NOTIFY | CLIP_TEXT)
+        elif flags & CLIP_PROVIDE and flags & CLIP_TEXT:
+            # 形式ごとに (長さ, 中身) が並んだものを zlib で縮めてある。文字は先頭の形式で、終わりに \0 が付く
+            data = zlib.decompressobj().decompress(body[4:], CLIPBOARD_MAX + 8)
+            size = struct.unpack(">I", data[:4])[0]
+            self.server.clipboard_from(self, data[4:4 + size].rstrip(b"\0").decode("utf-8", "replace"))
+
+    def send_clipboard(self, text: str) -> None:
+        """PC のクリップボードの文字を渡す (noVNC はクリップボードの欄に出す)。"""
+        if not self.ext_clipboard:
+            self._send(struct.pack(">B3xI", 3, len(text.encode("latin-1", "replace")))
+                       + text.encode("latin-1", "replace"))
+            return
+        raw = text.replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-8") + b"\0"
+        self._send_clip(CLIP_PROVIDE | CLIP_TEXT, zlib.compress(struct.pack(">I", len(raw)) + raw))
+
+    def _send_clip(self, flags: int, data: bytes = b"") -> None:
+        body = struct.pack(">I", flags) + data
+        self._send(struct.pack(">B3xi", 3, -len(body)) + body)  # 長さが負なら拡張の形
 
     def _updater(self) -> None:
         try:
@@ -1151,6 +1379,8 @@ class Server:
         self.sessions: list[Session] = []
         self.lock = threading.Lock()
         self.sock: socket.socket | None = None
+        self.clip_seq = 0  # 最後に見た PC のクリップボードの番号 (変わるたびに増える)
+        self.clip_last: str | None = None  # 最後にやり取りした文字 (同じものを送り返さない)
 
     @property
     def url(self) -> str:
@@ -1166,6 +1396,44 @@ class Server:
         self.sock = socket.create_server((self.host, self.port))
         self.sock.settimeout(0.5)
         threading.Thread(target=self._accept, daemon=True).start()
+        threading.Thread(target=self._watch_clipboard, daemon=True).start()
+
+    def _watch_clipboard(self) -> None:
+        """PC のクリップボードが変わったら、つないでいる相手に渡す (PC やツールで写したものをスマホで貼れる)。"""
+        self.clip_seq = _u.GetClipboardSequenceNumber()
+        while self.sock:
+            time.sleep(0.5)
+            seq = _u.GetClipboardSequenceNumber()
+            if seq == self.clip_seq or not self.sessions:
+                continue
+            text = clipboard_text()
+            if text is None and _u.IsClipboardFormatAvailable(CF_UNICODETEXT):
+                continue  # ほかのアプリが開いている。次にまた読む
+            self.clip_seq = seq
+            if text is None or text == self.clip_last:
+                continue
+            with self.lock:
+                sessions = list(self.sessions)
+            for s in sessions:
+                self.clipboard_to(s, text)
+
+    def clipboard_to(self, session: Session, text: str | None) -> None:
+        if text is None or len(text) * 3 > CLIPBOARD_MAX:
+            return
+        self.clip_last = text
+        try:
+            session.send_clipboard(text)
+        except (OSError, Closed):
+            return
+        self.log(f"{session.name}: PC のクリップボードを渡した ({len(text)} 文字)")
+
+    def clipboard_from(self, session: Session, text: str) -> None:
+        if text == self.clip_last:
+            return
+        self.clip_last = text
+        ok = set_clipboard_text(text)
+        self.log(f"{session.name}: PC のクリップボードに入れた ({len(text)} 文字)" if ok
+                 else f"{session.name}: PC のクリップボードに入れられなかった (ほかのアプリが開いている)")
 
     def stop(self) -> None:
         sock, self.sock = self.sock, None
@@ -1243,6 +1511,7 @@ class Server:
                 last = not self.sessions
             if last:
                 self.view.requested = None
+                self.view.input.release_keys()
                 self.view.source.connected(False)
 
     def _static(self, sock: socket.socket, path: str) -> None:

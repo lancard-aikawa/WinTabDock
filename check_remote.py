@@ -97,9 +97,12 @@ class Client:
         self.fb = Image.new("RGB", (w, h))
         # noVNC と同じ画素の形 (32 ビット、赤が下位) を頼む
         self.send(struct.pack(">BxxxBBBBHHHBBBxxx", 0, 32, 24, 0, 1, 255, 255, 255, 0, 8, 16))
-        encs = [remote.ENC_ZLIB, remote.ENC_RAW, remote.PSEUDO_EXT_DESKTOP_SIZE, remote.PSEUDO_DESKTOP_SIZE]
+        encs = [remote.ENC_ZLIB, remote.ENC_RAW, remote.PSEUDO_EXT_DESKTOP_SIZE, remote.PSEUDO_DESKTOP_SIZE,
+                remote.PSEUDO_EXT_CLIPBOARD]
         self.send(struct.pack(f">BxH{len(encs)}i", 2, len(encs), *encs))
         self.size_msgs: list[tuple[int, int, int, int]] = []
+        self.clips: list[str] = []  # PC から渡されたクリップボードの文字
+        self.clip_flags: list[int] = []  # 届いた拡張クリップボードの印
 
     def send(self, data: bytes) -> None:
         self.ws.send_binary(data)
@@ -112,7 +115,9 @@ class Client:
         return out
 
     def read_update(self) -> bool:
-        assert self.recv(1)[0] == 0
+        while (t := self.recv(1)[0]) == 3:  # ServerCutText (PC のクリップボード)
+            self._cut_text()
+        assert t == 0, t
         n = struct.unpack(">xH", self.recv(3))[0]
         pixels = False
         for _ in range(n):
@@ -128,6 +133,46 @@ class Client:
                 self.fb.paste(Image.frombytes("RGB", (w, h), data, "raw", "RGBX"), (x, y))
                 pixels = True
         return pixels
+
+    def _cut_text(self) -> None:
+        n = struct.unpack(">3xi", self.recv(7))[0]
+        body = self.recv(abs(n))
+        if n >= 0:
+            self.clips.append(body.decode("latin-1"))
+            return
+        flags = struct.unpack(">I", body[:4])[0]
+        self.clip_flags.append(flags)
+        if flags & remote.CLIP_CAPS:
+            return  # できることの知らせ (渡す・頼むの印も立っている)
+        if flags & remote.CLIP_PROVIDE:
+            data = zlib.decompress(body[4:])
+            size = struct.unpack(">I", data[:4])[0]
+            self.clips.append(data[4:4 + size].rstrip(b"\0").decode("utf-8").replace("\r\n", "\n"))
+        elif flags & remote.CLIP_REQUEST and self.paste_text is not None:
+            # noVNC と同じく、頼まれてから渡す (変わったことを知らせ、PC が頼んでくる)。noVNC の Deflator は Z_FULL_FLUSH で
+            # 終わりの印を付けない
+            raw = self.paste_text.replace("\n", "\r\n").encode("utf-8") + b"\0"
+            z = zlib.compressobj()
+            data = z.compress(struct.pack(">I", len(raw)) + raw) + z.flush(zlib.Z_FULL_FLUSH)
+            body = struct.pack(">I", remote.CLIP_PROVIDE | remote.CLIP_TEXT) + data
+            self.send(struct.pack(">B3xi", 6, -len(body)) + body)
+            self.paste_text = None
+
+    paste_text: str | None = None
+
+    def paste(self, text: str) -> None:
+        """スマホの noVNC のクリップボードの欄に文字を入れたのと同じ。"""
+        self.paste_text = text
+        body = struct.pack(">I", remote.CLIP_NOTIFY | remote.CLIP_TEXT)
+        self.send(struct.pack(">B3xi", 6, -len(body)) + body)
+
+    def pump(self, seconds: float) -> None:
+        """画面を頼んで読み続け、その間に届くクリップボードを受ける。"""
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            self.send(struct.pack(">BBHHHH", 3, 0, 0, 0, *self.fb.size))
+            self.read_update()
+            time.sleep(0.1)
 
     def full_frame(self) -> Image.Image:
         # 前に頼んだ分の画像が届く途中のことがある (それは古い)。頼んで読むのを 2 回して、2 枚目を使う
@@ -153,9 +198,10 @@ class Client:
         time.sleep(hold)
         self.send(struct.pack(">BBHH", 5, 0, x, y))
 
-    def key(self, keysym: int) -> None:
-        for down in (1, 0):
-            self.send(struct.pack(">BB2xI", 4, down, keysym))
+    def key(self, keysym: int, down: int | None = None) -> None:
+        """押して離す。down を渡すと、押すか離すかの片方だけ (Ctrl を押したままにする)"""
+        for d in (1, 0) if down is None else (down,):
+            self.send(struct.pack(">BB2xI", 4, d, keysym))
 
     def close(self) -> None:
         self.ws.close()
@@ -260,6 +306,18 @@ def steps(dock: td.Dock) -> None:
         title = ck.wait_title(h1, "text=okあ🍦🍦日本ニホンー。 ")
         check("カタカナに変換した字と「ー」「。」(noVNC は X のカナの keysym で送る) も届く",
               "text=okあ🍦🍦日本ニホンー。 " in title, title)
+        # 修飾キー: Ctrl+S (入力欄に割り当て) で "[S]" が付き、Shift+Home で全体を選んで z で置き換える
+        c.key(0xFFE3, 1)
+        c.key(ord("s"))
+        c.key(0xFFE3, 0)
+        title = ck.wait_title(h1, "[S] ")
+        check("Tk のツールでも Ctrl+S (ツールの割り当て) が効く", "text=okあ🍦🍦日本ニホンー。[S] " in title, title)
+        c.key(0xFFE1, 1)
+        c.key(0xFF50)
+        c.key(0xFFE1, 0)
+        c.key(ord("z"))
+        title = ck.wait_title(h1, "text=z ")
+        check("Tk のツールでも Shift+Home で選べ、Shift を離すと普通に打てる", "text=z " in title, title)
 
         mapped = tk_get(dock, lambda: (dock.menu_button.winfo_ismapped(), dock.settings_button.winfo_ismapped(),
                                        dock.zoom_out_button.winfo_ismapped(), dock.zoom_in_button.winfo_ismapped()))
@@ -342,6 +400,7 @@ def steps(dock: td.Dock) -> None:
         title = ck.wait_title(h2, "count=1")
         check("縮めた画面の上でも押せる", "count=1" in title, title)
         edit_steps(dock, c, edit_app)
+        clipboard_steps(dock, c, edit_app)
         menu_steps(dock, c, edit_app)
         find_dlg = find_steps(dock, c, edit_app)
         # つないでいる間に開いた外のアプリの窓 (RepoTether が開く VS Code など) は、PC の画面に出てスマホから見えなかった。
@@ -537,6 +596,48 @@ def edit_steps(dock: td.Dock, c, edit_app) -> None:
     want = "abc\r\n日本語🍦ニホー"
     check("Tk でない窓 (EDIT) にも、日本語の変換・カタカナ・絵文字・Enter・Tab・BackSpace・矢印・Delete が送った順に効く",
           text == want, f"{text!r} / 期待 {want!r}")
+    # 修飾キー: Shift+Home で行を選び、Ctrl+X で切り取って Ctrl+V で 2 回貼る。Ctrl+S はショートカットの表で "[S]" を足す。
+    # Ctrl を離した後の g は、ただの g になる
+    for ks in (0xFF0D, ord("d"), ord("e"), ord("f")):
+        c.key(ks)
+    c.key(0xFFE1, 1)
+    c.key(0xFF50)
+    c.key(0xFFE1, 0)
+    c.key(0xFFE3, 1)
+    for ks in (ord("x"), ord("v"), ord("v"), ord("s")):
+        c.key(ks)
+    c.key(0xFFE3, 0)
+    c.key(ord("g"))
+    time.sleep(1.0)
+    text = edit_text(he)
+    check("Tk でない窓 (EDIT) で、Shift+Home・Ctrl+X・Ctrl+V と、ショートカットの表の Ctrl+S が効き、Ctrl を離すと元に戻る",
+          text == want + "\r\ndefdef[S]g", f"{text!r}")
+
+
+def clipboard_steps(dock: td.Dock, c, edit_app) -> None:
+    """PC とスマホのクリップボード。edit_steps の Ctrl+X で、PC のクリップボードは "def" になっている"""
+    _, he = edit_app
+    c.pump(1.5)
+    check("拡張クリップボード (UTF-8) を使えることを知らせる",
+          any(f & remote.CLIP_CAPS and f & remote.CLIP_TEXT for f in c.clip_flags), str([hex(f) for f in c.clip_flags]))
+    check("ツールで写した (Ctrl+X) PC のクリップボードが、スマホに渡る", c.clips[-1:] == ["def"], repr(c.clips[-3:]))
+    phone = "スマホから🍦\n2 行目"
+    before = len(c.clips)
+    c.paste(phone)
+    c.pump(1.5)
+    pc = remote.clipboard_text()
+    check("スマホのクリップボードの欄の文字 (日本語・絵文字・改行) が、PC のクリップボードに入る",
+          pc == phone.replace("\n", "\r\n"), repr(pc))
+    check("スマホから入れた文字は、スマホに送り返さない", len(c.clips) == before, repr(c.clips[before:]))
+    c.key(0xFFE3, 1)
+    c.key(ord("v"))
+    c.key(0xFFE3, 0)
+    time.sleep(1.0)
+    text = edit_text(he)
+    check("スマホから入れた文字を、Ctrl+V でツールに貼れる", text.endswith("g" + phone.replace("\n", "\r\n")), repr(text[-20:]))
+    remote.set_clipboard_text("PC で写した")
+    c.pump(1.5)
+    check("PC で写した文字も、スマホに渡る", c.clips[-1:] == ["PC で写した"], repr(c.clips[-3:]))
 
 
 def not_adopted_when_disconnected(dock: td.Dock, apps: list) -> bool:
@@ -842,8 +943,11 @@ def main() -> None:
     dock.root.geometry("900x600+150+120")
     if os.environ.get("CHECK_REMOTE_DUMP"):
         watch_tk(dock)
+    saved_clip = remote.clipboard_text()  # 試験でクリップボードを書き換えるので、文字なら最後に戻す
     threading.Thread(target=lambda: (time.sleep(1.0), steps(dock)), daemon=True).start()
     dock.root.mainloop()
+    if saved_clip is not None:
+        remote.set_clipboard_text(saved_clip)
     ng = [r for r in results if not r[1]]
     print(f"\n{len(results) - len(ng)}/{len(results)} OK")
     sys.exit(1 if ng else 0)
