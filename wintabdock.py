@@ -370,10 +370,26 @@ class RemoteSource:
         out = [(d, 0, 0, w, h)]
         a = self._active()
         if a:
-            for hwnd in [a] + owned_popups(a):
+            popups = tool_popups(a, {t.hwnd for t in self.dock.tabs} | {d})
+            if self.dock._remote_geometry:  # つないでいる間 (ドックが画面の外にある間) だけ
+                for hwnd in popups:
+                    self._bring_in(hwnd, ox, oy, w, h)
+            for hwnd in [a] + popups:
                 x, y = remote.client_origin(hwnd)
                 out.append((hwnd, x - ox, y - oy, *remote.client_size(hwnd)))
         return out
+
+    def _bring_in(self, hwnd: int, ox: int, oy: int, w: int, h: int) -> None:
+        """ツールの小窓 (検索など) を、見せる範囲 (ドックの上) に入れる。ドックは画面の外にあるので、ツールが小窓を
+        画面の中に収めようとして PC の画面に出した (Mery の検索は画面の右端へ寄せられた)。横は入らなければ真ん中、
+        縦は入らなければ下を揃える。元の位置は覚えておき、切れたら戻す (戻さないと、次に PC で開いた時も画面の外に出る)"""
+        left, top, pw, ph = rect_of(hwnd)
+        x, y = left - ox, top - oy
+        nx = x if 0 <= x <= w - pw else max(0, (w - pw) // 2)
+        ny = y if 0 <= y <= h - ph else max(0, min(y, h - ph))
+        if (nx, ny) != (x, y):
+            self.dock.remote_moved.setdefault(hwnd, (left, top))
+            user32.SetWindowPos(hwnd, None, ox + nx, oy + ny, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
 
     def extent(self) -> tuple[int, int]:
         layers = self.layers()[:2]  # ドックと選んでいるツール (ダイアログははみ出したら切る)
@@ -399,13 +415,25 @@ class RemoteSource:
         return "WinTabDock"
 
 
-def owned_popups(hwnd: int) -> list[int]:
-    """hwnd が持ち主の、見えている窓 (ダイアログなど)。"""
+# ツールの小窓として見せない窓の種類 (メニューは remote.Menus が扱う。IME・ヒントは見せるものではない)
+NOT_POPUPS = {"#32768", "IME", "MSCTFIME UI", "tooltips_class32", "THintWindow", "SysShadow"}
+
+
+def tool_popups(hwnd: int, exclude: set[int]) -> list[int]:
+    """ツール hwnd が出した、見えている窓 (ダイアログなど)。hwnd が持ち主の窓と、同じプロセスのほかの窓
+    (持ち主の無い小窓もある)。exclude (タブにしている窓・ドック) と、大きさの無い窓 (Delphi の TApplication) は除く。"""
+    pid = window_pid(hwnd)
     found: list[int] = []
+    buf = ctypes.create_unicode_buffer(32)
 
     def cb(h, _):
-        if user32.GetWindow(h, GW_OWNER) == hwnd and user32.IsWindowVisible(h):
-            found.append(h)
+        if h == hwnd or h in exclude or not user32.IsWindowVisible(h):
+            return True
+        if user32.GetWindow(h, GW_OWNER) == hwnd or window_pid(h) == pid:
+            user32.GetClassNameW(h, buf, 32)
+            _, _, w, hh = rect_of(h)
+            if buf.value not in NOT_POPUPS and w > 0 and hh > 0:
+                found.append(h)
         return True
 
     user32.EnumWindows(WNDENUMPROC(cb), 0)
@@ -446,6 +474,7 @@ class Dock:
         self._remote_panel: tk.Toplevel | None = None
         self._remote_notice: tk.Toplevel | None = None  # つないでいる間、PC の画面に出す知らせ
         self._remote_geometry: str | None = None  # 遠隔からつないでいる間 (ドックを画面の外に置く間) の、元の大きさ・位置
+        self.remote_moved: dict[int, tuple[int, int]] = {}  # つないでいる間にドックの上へ移したツールの小窓 → 元の位置
         self._tk_calls: queue.SimpleQueue = queue.SimpleQueue()  # 別のスレッドから Tk で動かしてほしいこと
         self.dock_hwnd = 0
         self._closing = False
@@ -1163,6 +1192,11 @@ class Dock:
             self.root.geometry(geometry)
             self.root.update_idletasks()
             self.place_active(show=True)
+            # ドックの上へ移したツールの小窓を元の位置へ戻す。閉じて隠れているだけの小窓も (次に開くと前の位置に出る)
+            moved, self.remote_moved = self.remote_moved, {}
+            for hwnd, (x, y) in moved.items():
+                if user32.IsWindow(hwnd):
+                    user32.SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
             self.remote_log("切れたので、ドックを元の場所に戻した")
 
     ZOOMS = (0.5, 0.67, 0.75, 0.9, 1.0, 1.25, 1.5)  # スマホでの表示倍率の段

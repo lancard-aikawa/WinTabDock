@@ -16,6 +16,7 @@ Chrome の開発用の口 (adb forward tcp:29222) から本物のタッチと、
 """
 
 import ctypes
+import ctypes.wintypes
 import os
 import subprocess
 import sys
@@ -72,15 +73,95 @@ def dock_button_pos(dock: td.Dock, button) -> tuple[int, int]:
     return round((x - ox + w // 2) * s), round((y - oy + h // 2) * s)
 
 
+def start_edit_app(tag: str) -> tuple[subprocess.Popen, int]:
+    """Tk でない試験用の窓 (experiments/edit_testapp.py。上の帯を押すとメニュー、その「検索...」で小窓)。"""
+    title = f"edit-testapp {tag}"
+    proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve().parent / "experiments" / "edit_testapp.py"), tag])
+    for _ in range(100):
+        hwnd = td.user32.FindWindowW("EditTestApp", title)
+        if hwnd:
+            return proc, hwnd
+        time.sleep(0.1)
+    raise RuntimeError(f"{title} の窓が出ない")
+
+
+def canvas_dark(tab, x: int, y: int, w: int, h: int) -> int:
+    """noVNC の画面 (canvas) の、その範囲の暗い画素の数。メニューの文字が写っているかを見る。"""
+    return tab.js(f"(() => {{ const d = document.querySelector('canvas').getContext('2d').getImageData({x}, {y}, {w}, {h})"
+                  ".data; let n = 0; for (let i = 0; i < d.length; i += 4) if (d[i] + d[i + 1] + d[i + 2] < 300) n++;"
+                  " return n; })()")
+
+
+def menu_steps(dock: td.Dock, tab, he: int) -> None:
+    """Mery のメニューの帯と同じく、押した時にメニューを出す窓。メニューは何度開いても毎回スマホに写るか
+    (Mery で「上手く表示されないことが多い」と報告があった)。「検索...」の小窓はスマホの画面の中に出るか"""
+    bx, by, bw, bh = td.rect_of(dock.tabs[2].button_hwnd)
+    ox, oy = remote.client_origin(dock.dock_hwnd)
+    view = dock.remote_server.view
+    s = view.scale  # 前のツール (最小の幅) で縮めている
+    tab.tap(round((bx - ox + bw // 2) * s), round((by - oy + bh // 2) * s))
+    time.sleep(2.0)
+    ck.check("Tk でないツール (メニューの帯のある窓) のタブに切り替わる", dock.active is dock.tabs[2],
+             dock.active.name if dock.active else "-")
+    _, tx, ty, _, _ = td.RemoteSource(dock).layers()[1]
+    s = view.scale
+    tid = td.user32.GetWindowThreadProcessId(he, None)
+
+    def open_menu() -> tuple | None:
+        tab.tap(round((tx + 20) * s), round((ty + 10) * s))
+        for _ in range(40):
+            layer = next((lr for lr in view.layers()[2:] if remote.Menus.find(he) and lr[0] in view.menus.placed), None)
+            if layer:
+                return layer
+            time.sleep(0.05)
+        return None
+
+    shown = []
+    for i in range(5):
+        layer = open_menu()
+        time.sleep(0.6)
+        dark = canvas_dark(tab, *(round(v * s) for v in layer[1:])) if layer else -1
+        shown.append(dark)
+        if i == 0:
+            va.screenshot("dock-5-menu")
+        tab.tap(round((tx + 200) * s), round((ty + 300) * s))  # 外を押して閉じる
+        time.sleep(0.6)
+    ck.check("メニューを 5 回開いて、5 回ともスマホの画面に写る (メニューの範囲の暗い画素の数)",
+             all(n > 30 for n in shown) and not remote.Menus.find(he), f"{shown} スレッド {tid}")
+
+    layer = open_menu()
+    if layer:
+        menu = layer[0]
+        hmenu = remote.send_result(menu, remote.MN_GETHMENU)
+        r = ctypes.wintypes.RECT()
+        ctypes.windll.user32.GetMenuItemRect(None, ctypes.c_void_p(hmenu), 2, ctypes.byref(r))  # 「検索...」
+        tab.tap(round(((r.left + r.right) // 2 - ox) * s), round(((r.top + r.bottom) // 2 - oy) * s))
+    dlg = 0
+    for _ in range(60):
+        dlg = td.user32.FindWindowW("EditTestFind", "edit-testapp-find")
+        if dlg and td.user32.IsWindowVisible(dlg):
+            break
+        time.sleep(0.05)
+    time.sleep(1.0)
+    va.screenshot("dock-6-find")
+    w, h = remote.client_size(dock.dock_hwnd)
+    lr = next((x for x in view.layers() if dlg and x[0] == dlg), None)
+    ck.check("ツールが PC の画面の中に収めて出した小窓 (Mery の検索など) が、スマホの画面の中に出る",
+             bool(lr) and 0 <= lr[1] and lr[1] + lr[3] <= w and 0 <= lr[2] and lr[2] + lr[4] <= h,
+             f"小窓 {lr} ドック {w}x{h} 画面での位置 {dlg and td.rect_of(dlg)}")
+
+
 def steps(dock: td.Dock) -> None:
     app1, h1 = ck.start_app(f"an{os.getpid()}a")
     app2, h2 = ck.start_app(f"an{os.getpid()}b", 600)
+    edit, he = start_edit_app(f"an{os.getpid()}e")
     rotation = (va.adb("shell", "settings", "get", "system", "accelerometer_rotation"),
                 va.adb("shell", "settings", "get", "system", "user_rotation"))
     tab_info = tab = None
     try:
         dock.call_in_tk(lambda: dock.adopt("app1", h1))
         dock.call_in_tk(lambda: dock.adopt("app2", h2))
+        dock.call_in_tk(lambda: dock.adopt("edit", he))
         dock.call_in_tk(lambda: dock.select(dock.tabs[0]))
         dock.call_in_tk(dock.start_remote)
         for _ in range(100):
@@ -189,6 +270,7 @@ def steps(dock: td.Dock) -> None:
         tab.tap(round((tx + 140) * s), round((ty + 110) * s))
         title = ck.wait_title(h2, "count=1")
         ck.check(f"最小の幅のツール (縮めて {s:.2f} 倍) の上でも押せる", "count=1" in title, title)
+        menu_steps(dock, tab, he)
 
         va.adb("shell", "settings", "put", "system", "accelerometer_rotation", "0")
         va.adb("shell", "settings", "put", "system", "user_rotation", "1")
@@ -221,7 +303,7 @@ def steps(dock: td.Dock) -> None:
         if not LAN:
             va.adb("reverse", "--remove", f"tcp:{remote.DEFAULT_PORT}", check=False)
         # 試験用の窓を先に閉じてから、ドックを閉じる (ドックを閉じるとこのプロセスが終わり、このスレッドも止まる)
-        ck.close_apps([(app1, h1), (app2, h2)])
+        ck.close_apps([(app1, h1), (app2, h2), (edit, he)])
         dock.call_in_tk(dock.stop_remote)
         dock.call_in_tk(dock.quit, wait=False)
 

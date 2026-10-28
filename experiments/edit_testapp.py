@@ -4,7 +4,9 @@
 
 タイトルは "edit-testapp <目印>"。中の文字は外から WM_GETTEXT で読める。標準ライブラリだけ。
 上の帯 (高さ BAR_H) を押すと、Mery のメニューの帯と同じく、押した時に TrackPopupMenu でメニューを出す。
-「XYZ を挿入」は文字を足し、「その他」の下の「SUB を挿入」も文字を足す (メニューを遠隔から選べたかを中の文字で見る)
+「XYZ を挿入」は文字を足し、「その他」の下の「SUB を挿入」も文字を足す (メニューを遠隔から選べたかを中の文字で見る)。
+「検索...」は、Mery の検索と同じく、この窓が持ち主の小窓 (タイトル "edit-testapp-find"、中に EDIT) を、画面の中に
+収めて出す (この窓が画面の外にあれば、画面の右端へ寄せる)
 """
 
 import ctypes
@@ -46,8 +48,11 @@ WS_OVERLAPPEDWINDOW, WS_VISIBLE, WS_CHILD, WS_VSCROLL = 0x00CF0000, 0x10000000, 
 ES_MULTILINE, ES_AUTOVSCROLL, ES_WANTRETURN = 0x0004, 0x0040, 0x1000
 MF_STRING, MF_POPUP = 0x0000, 0x0010
 TPM_RETURNCMD = 0x0100
+WS_POPUP, WS_CAPTION, WS_SYSMENU, WS_BORDER = 0x80000000, 0x00C00000, 0x00080000, 0x00800000
 BAR_H = 28
-ID_XYZ, ID_SUB = 101, 102
+ID_XYZ, ID_SUB, ID_FIND = 101, 102, 103
+u.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+u.SystemParametersInfoW.argtypes = [wintypes.UINT, wintypes.UINT, ctypes.c_void_p, wintypes.UINT]
 
 
 class WNDCLASSW(ctypes.Structure):
@@ -63,7 +68,23 @@ def make_menu() -> int:
     sub = u.CreatePopupMenu()
     u.AppendMenuW(sub, MF_STRING, ID_SUB, "SUB を挿入")
     u.AppendMenuW(menu, MF_POPUP, sub, "その他")
+    u.AppendMenuW(menu, MF_STRING, ID_FIND, "検索...")
     return menu
+
+
+def open_find(top: int, inst: int) -> None:
+    """Mery の検索のような小窓。持ち主の窓の少し下に出すが、画面 (作業領域) の中に収める。"""
+    r = wintypes.RECT()
+    u.GetWindowRect(top, ctypes.byref(r))
+    work = wintypes.RECT()
+    u.SystemParametersInfoW(0x0030, 0, ctypes.byref(work), 0)  # SPI_GETWORKAREA
+    w, h = 300, 120
+    x = max(work.left, min(r.left, work.right - w))
+    y = max(work.top, min(r.top + 14, work.bottom - h))
+    dlg = u.CreateWindowExW(0, "EditTestFind", "edit-testapp-find", WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+                            x, y, w, h, top, None, inst, None)
+    box = u.CreateWindowExW(0, "EDIT", "", WS_CHILD | WS_VISIBLE | WS_BORDER, 10, 10, 260, 24, dlg, None, inst, None)
+    u.SetFocus(box)
 
 
 def main() -> None:
@@ -93,7 +114,10 @@ def main() -> None:
             if cmd in (ID_XYZ, ID_SUB):
                 text = ctypes.create_unicode_buffer("XYZ" if cmd == ID_XYZ else "SUB")
                 u.SendMessageW(edit[0], EM_REPLACESEL, 1, ctypes.addressof(text))
-            u.SetFocus(edit[0])
+            if cmd == ID_FIND:
+                open_find(hwnd, inst)
+            else:
+                u.SetFocus(edit[0])
             return 0
         if msg == WM_DESTROY:
             u.PostQuitMessage(0)
@@ -103,7 +127,10 @@ def main() -> None:
     wndproc = WNDPROC(proc)
     wc = WNDCLASSW(lpfnWndProc=wndproc, hInstance=inst, hbrBackground=6, lpszClassName="EditTestApp")  # COLOR_WINDOW+1
     u.RegisterClassW(ctypes.byref(wc))
-    top = u.CreateWindowExW(0, "EditTestApp", f"edit-testapp {tag}", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+    find_proc = WNDPROC(lambda h, m, w, lp: u.DefWindowProcW(h, m, w, lp))
+    u.RegisterClassW(ctypes.byref(WNDCLASSW(lpfnWndProc=find_proc, hInstance=inst, hbrBackground=16,  # COLOR_BTNFACE+1
+                                            lpszClassName="EditTestFind")))
+    top =u.CreateWindowExW(0, "EditTestApp", f"edit-testapp {tag}", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
                             200, 200, 500, 400, None, None, inst, None)
     edit[0] = u.CreateWindowExW(0, "EDIT", "", WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL
                                 | ES_WANTRETURN, 0, BAR_H, 480, 330, top, None, inst, None)

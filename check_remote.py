@@ -328,12 +328,18 @@ def steps(dock: td.Dock) -> None:
         check("縮めた画面の上でも押せる", "count=1" in title, title)
         edit_steps(dock, c, edit_app)
         menu_steps(dock, c, edit_app)
+        find_dlg = find_steps(dock, c, edit_app)
 
         c.close()
         c = None
         time.sleep(1.5)
         now = tk_get(dock, dock.root.geometry)
         check("切ると、ドックが元の大きさ・位置に戻る", now == original, f"{now} / 元 {original}")
+        if find_dlg:
+            fx = td.rect_of(find_dlg)[0]
+            vl = td.user32.GetSystemMetrics(76)
+            check("切ると、遠隔の画面へ移した小窓は PC の画面の中に戻る",
+                  vl <= fx < vl + td.user32.GetSystemMetrics(78), f"小窓 {td.rect_of(find_dlg)}")
         dock.call_in_tk(dock.save_session)
         saved = json.loads((HOME / "session.json").read_text(encoding="utf-8"))["geometry"]
         check("前回の位置には、元の位置を覚える", saved == original, saved)
@@ -500,6 +506,47 @@ def edit_steps(dock: td.Dock, c, edit_app) -> None:
     want = "abc\r\n日本語🍦ニホー"
     check("Tk でない窓 (EDIT) にも、日本語の変換・カタカナ・絵文字・Enter・Tab・BackSpace・矢印・Delete が送った順に効く",
           text == want, f"{text!r} / 期待 {want!r}")
+
+
+def find_steps(dock: td.Dock, c, edit_app) -> int:
+    """ツールの小窓 (Mery の検索)。Mery は、持ち主の窓 (画面の外) の近くに出そうとして画面の中に収めるので、PC の画面の
+    右端に出て、遠隔の画面の外になった。試験用の窓の「検索...」も同じく収めて出す。小窓を返す (切った後に見る)"""
+    _, he = edit_app
+    view = dock.remote_server.view
+    s = view.scale
+    _, tx, ty, tw, th = RemoteSource_layers(dock)[1]
+    c.tap(round((tx + 20) * s), round((ty + 10) * s))
+    menus = []
+    for _ in range(60):
+        menus = find_menus(he)
+        if menus and remote.client_origin(menus[0])[0] >= td.user32.GetSystemMetrics(78):
+            break
+        time.sleep(0.05)
+    dlg = 0
+    if menus:
+        x, y = menu_item_pos(dock, menus[0], 2)  # 「検索...」
+        c.tap(round(x * s), round(y * s))
+        for _ in range(60):
+            dlg = next((h for h in all_windows() if td.window_title(h) == "edit-testapp-find"
+                        and td.user32.IsWindowVisible(h)), 0)
+            if dlg:
+                break
+            time.sleep(0.05)
+    time.sleep(0.5)
+    w, h = remote.client_size(dock.dock_hwnd)
+    layer = next((lr for lr in RemoteSource_layers(dock) if dlg and lr[0] == dlg), None)
+    check("ツールが PC の画面の中に収めて出した小窓 (Mery の検索など) も、遠隔の画面の中に入る",
+          bool(layer) and 0 <= layer[1] and layer[1] + layer[3] <= w and 0 <= layer[2] and layer[2] + layer[4] <= h,
+          f"小窓 {layer} ドック {w}x{h} 画面での位置 {dlg and td.rect_of(dlg)}")
+    for ch in "find":
+        c.key(ord(ch))
+    time.sleep(0.5)
+    box = ctypes.windll.user32.FindWindowExW(dlg, None, "EDIT", None) if dlg else 0
+    buf = ctypes.create_unicode_buffer(32)
+    if box:
+        ctypes.windll.user32.SendMessageW(box, 0x000D, 32, buf)  # WM_GETTEXT
+    check("小窓に打てる", buf.value == "find", repr(buf.value))
+    return dlg
 
 
 def edit_text(he: int) -> str:
