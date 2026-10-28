@@ -153,21 +153,31 @@ _u.EnumWindows.argtypes = [_EnumProc, LPARAM]
 _u.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 
 
+# 中身を合成 (DirectComposition) で描く部品の窓の種類。PrintWindow の普通の撮り方では、その部分が黒く写る。
+# エクスプローラーの上部 (アドレスバー・コマンドの帯) は WinUI 3 の部品で、真っ黒だった
+COMPOSITION_CLASSES = {"Microsoft.UI.Content.DesktopChildSiteBridge", "Windows.UI.Composition.DesktopWindowContentBridge"}
+
+
+def _composited(name: str) -> bool:
+    return name.startswith("Chrome_") or name in COMPOSITION_CLASSES
+
+
 def uses_chromium(hwnd: int) -> bool:
-    """窓かその子窓が Chromium (Edge・Electron・WebView2) か。窓の種類の名前が Chrome_ で始まる。"""
+    """窓かその子窓が Chromium (Edge・Electron・WebView2) か、合成で描く部品 (WinUI・XAML) を持つか。
+    窓の種類の名前が Chrome_ で始まるか、COMPOSITION_CLASSES。"""
     if hwnd not in _chromium:
         found = []
         buf = ctypes.create_unicode_buffer(64)
 
         def cb(h, _):
             _u.GetClassNameW(h, buf, 64)
-            if buf.value.startswith("Chrome_"):
+            if _composited(buf.value):
                 found.append(h)
                 return False
             return True
 
         _u.GetClassNameW(hwnd, buf, 64)
-        if not buf.value.startswith("Chrome_"):
+        if not _composited(buf.value):
             _u.EnumChildWindows(hwnd, _EnumProc(cb), 0)
         else:
             found.append(hwnd)

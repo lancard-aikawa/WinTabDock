@@ -85,7 +85,7 @@ uv run check_close.py PortWho RepoTether         # × を押したとき: 一緒
 「設定」の「スマホから使う」で入り切りする (入れたかは settings.json の `remote` に覚え、次の起動でも始める)。
 
 ```sh
-uv run check_remote.py           # ドックに試験用の窓を 3 つ取り込み、noVNC と同じ WebSocket でつなぐ。設定の画面と QR コード、つないでいる間の知らせの窓、表示倍率、絵文字・日本語の変換・カタカナ (Tk と、Tk でない EDIT の窓)、ツールが開くメニューと小窓も (56 項目)
+uv run check_remote.py           # ドックに試験用の窓を 3 つ取り込み、noVNC と同じ WebSocket でつなぐ。設定の画面と QR コード、つないでいる間の知らせの窓、表示倍率、絵文字・日本語の変換・カタカナ (Tk と、Tk でない EDIT の窓)、ツールが開くメニューと小窓、つないでいる間に開いた外のアプリの窓も (59 項目。人の WinTabDock が Wi-Fi で待ち受けていると 55)
 uv run check_remote_android.py   # Android の実機 (USB デバッグ) の Chrome から。メニューと小窓、iPad の日本語の入力の並び、キーの記録も (19 項目)
 uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi で PC のこのアドレスにつなぐ (USB は試験の操作だけ。20 項目)
 ```
@@ -271,6 +271,16 @@ uv run experiments/vnc_android_check.py                       # Android の実�
     (key・code・keyCode・isComposing)、composition、input (inputType・入力欄の末尾)、PC へ送ったキーを出す。配る vnc.html に
     読み込みを足し、URL に keylog が無ければ何もしない。手直しした keyboard.js を配ると remote.log に書く (ページを読み込み
     直したかが分かる)
+- **RepoTether が開く外のアプリ (VS Code・Windows Terminal・エクスプローラーなど) が、スマホではなく PC の画面に出た**
+  (ユーザーの報告、2026-10-28)。外のアプリは別のプロセスで、エクスプローラーや Windows Terminal は動いているプロセスが
+  窓を開くので、「ツールが開いた窓」とは見分けられない。ユーザーと決めた扱い: つないでいる間に開いた普通の窓 (持ち主が無く、
+  タイトルバーとタイトルのある窓) は、どのアプリのものでもタブにして選ぶ (`Dock.maybe_adopt_remote`)。切ってもタブのまま
+  残す。すでにタブにしているアプリの 2 つ目の窓は、タブにせず小窓として重ねる。窓が現れたことを受けるフックは、自動取り込みが
+  切ってあっても動かすようにした。`experiments/external_remote_probe.py` で、エクスプローラーと Windows Terminal が
+  3 秒ほどでタブになってスマホに出ることを確かめた (VS Code は、作業中の VS Code に窓が足されるので試していない)
+  - エクスプローラーの上部 (タブ・アドレスバー・コマンドの帯) は WinUI 3 の部品 (子窓 `Microsoft.UI.Content.DesktopChildSiteBridge`)
+    で、普通の撮り方では真っ黒だった。Chromium と同じく中身ごと撮る (PW_RENDERFULLCONTENT。`remote.COMPOSITION_CLASSES`)
+  - 登録していないアプリのタブの名前は exe の名前 (explorer・WindowsTerminal・Code など)
   - ユーザーが iPad のページを読み込み直したら直っていた (2026-10-28)。崩れたのは、開いたままのページが手直し前の
     keyboard.js で動いていたため。exe を新しくしたら、ページを読み込み直してもらう (README に書いた)
 - **前に開いた noVNC のタブが古い合言葉でつなぎ直し続けると、新しいタブの接続が 20 秒以上待たされた。** 断られた接続が続くと、

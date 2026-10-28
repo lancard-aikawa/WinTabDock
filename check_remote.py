@@ -165,6 +165,7 @@ def steps(dock: td.Dock) -> None:
     app1, h1 = ck.start_app(f"r{os.getpid()}a")
     app2, h2 = ck.start_app(f"r{os.getpid()}b", 600)
     edit_app = start_edit_app(f"r{os.getpid()}e")
+    apps: list = []  # 途中で開く試験用の窓 (最後に閉じる)
     c = None
     try:
         dock.call_in_tk(lambda: dock.adopt("app1", h1))
@@ -343,6 +344,18 @@ def steps(dock: td.Dock) -> None:
         edit_steps(dock, c, edit_app)
         menu_steps(dock, c, edit_app)
         find_dlg = find_steps(dock, c, edit_app)
+        # つないでいる間に開いた外のアプリの窓 (RepoTether が開く VS Code など) は、PC の画面に出てスマホから見えなかった。
+        # 登録していない別のプロセスの窓を開くと、タブになって選ばれる
+        later = ck.start_app(f"r{os.getpid()}c")
+        apps.append(later)
+        for _ in range(50):
+            if dock.active and dock.active.hwnd == later[1]:
+                break
+            time.sleep(0.1)
+        layer = RemoteSource_layers(dock)[1] if dock.active else None
+        check("つないでいる間に開いた別のアプリの窓は、タブになって選ばれ、遠隔の画面に出る",
+              bool(dock.active) and dock.active.hwnd == later[1] and layer[0] == later[1] and layer[1] >= 0,
+              f"選んでいるタブ {dock.active and dock.active.name} {layer}")
 
         c.close()
         c = None
@@ -354,6 +367,10 @@ def steps(dock: td.Dock) -> None:
             vl = td.user32.GetSystemMetrics(76)
             check("切ると、遠隔の画面へ移した小窓は PC の画面の中に戻る",
                   vl <= fx < vl + td.user32.GetSystemMetrics(78), f"小窓 {td.rect_of(find_dlg)}")
+        check("つないでいる間にタブにした窓は、切ってもタブのまま残る", any(t.hwnd == later[1] for t in dock.tabs),
+              str([t.name for t in dock.tabs]))
+        check("つないでいない間に開いた窓は、タブにしない (自動取り込みが切ってある試験のドック)",
+              not_adopted_when_disconnected(dock, apps), "")
         dock.call_in_tk(dock.save_session)
         saved = json.loads((HOME / "session.json").read_text(encoding="utf-8"))["geometry"]
         check("前回の位置には、元の位置を覚える", saved == original, saved)
@@ -381,7 +398,7 @@ def steps(dock: td.Dock) -> None:
             c.close()
         # 試験用の窓を先に閉じてから、ドックを閉じる。ドックを閉じるとこのプロセスが終わり、このスレッドも止まる
         # (先にドックを閉じていたら、窓を閉じる前に止まり、試験用の窓が 90 個残った)
-        ck.close_apps([(app1, h1), (app2, h2), edit_app])
+        ck.close_apps([(app1, h1), (app2, h2), edit_app] + apps)
         dock.call_in_tk(dock.stop_remote)
         dock.call_in_tk(dock.quit, wait=False)
 
@@ -520,6 +537,14 @@ def edit_steps(dock: td.Dock, c, edit_app) -> None:
     want = "abc\r\n日本語🍦ニホー"
     check("Tk でない窓 (EDIT) にも、日本語の変換・カタカナ・絵文字・Enter・Tab・BackSpace・矢印・Delete が送った順に効く",
           text == want, f"{text!r} / 期待 {want!r}")
+
+
+def not_adopted_when_disconnected(dock: td.Dock, apps: list) -> bool:
+    """つないでいないときに別のアプリの窓を開いても、タブにならない。"""
+    other = ck.start_app(f"r{os.getpid()}d")
+    apps.append(other)
+    time.sleep(1.5)
+    return not any(t.hwnd == other[1] for t in dock.tabs)
 
 
 def find_steps(dock: td.Dock, c, edit_app) -> int:

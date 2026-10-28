@@ -529,13 +529,13 @@ class Dock:
         self.root.bind("<Map>", lambda e: self.on_restore() if e.widget is self.root else None)
         self._layout_pending = False
         self.root.after(500, self.poll)
-        if self.auto_adopt:
-            # 窓が現れたことはフックで受ける。フックは別スレッドで受け、キューで渡す
-            # (tkinter の mainloop と同じスレッドで ctypes のコールバックを受けると Python ごと落ちた)
-            self._shown: queue.SimpleQueue[int] = queue.SimpleQueue()
-            self._hook_thread_id = 0
-            threading.Thread(target=self._watch_windows, daemon=True).start()
-            self.root.after(150, self._drain_shown)
+        # 窓が現れたことはフックで受ける (自動取り込みと、遠隔でつないでいる間に開いた窓をタブにするため)。
+        # フックは別スレッドで受け、キューで渡す (tkinter の mainloop と同じスレッドで ctypes のコールバックを
+        # 受けると Python ごと落ちた)
+        self._shown: queue.SimpleQueue[int] = queue.SimpleQueue()
+        self._hook_thread_id = 0
+        threading.Thread(target=self._watch_windows, daemon=True).start()
+        self.root.after(150, self._drain_shown)
         self.root.after(300, lambda: self.startup(session))
         self.root.after(20, self._drain_tk_calls)
         if self.prefs.get("remote"):
@@ -564,8 +564,31 @@ class Dock:
             seen.add(self._shown.get())
         for hwnd in seen:
             # 現れた直後は、タイトルや大きさがまだ決まっていないことがあるので少し待つ
-            self.root.after(400, lambda h=hwnd: self.maybe_adopt(h))
+            self.root.after(400, lambda h=hwnd: self.on_window_shown(h))
         self.root.after(150, self._drain_shown)
+
+    def on_window_shown(self, hwnd: int) -> None:
+        if self.auto_adopt:
+            self.maybe_adopt(hwnd)
+        if self._remote_geometry:
+            self.maybe_adopt_remote(hwnd)
+
+    def maybe_adopt_remote(self, hwnd: int) -> None:
+        """遠隔でつないでいる間に開いた窓を、どのアプリのものでもタブにして選ぶ (スマホに出す)。ツールが外のアプリ
+        (RepoTether が開く VS Code・ターミナル・エクスプローラーなど) を開くと、PC の画面に出てスマホからは見えなかった。
+        すでにタブにしているアプリの 2 つ目の窓は、タブにせず小窓として重ねる (RemoteSource)。切ってもタブのまま残す"""
+        if self._closing or hwnd in self.ignored or hwnd == self.hwnd or any(t.hwnd == hwnd for t in self.tabs):
+            return
+        if (not user32.IsWindow(hwnd) or not user32.IsWindowVisible(hwnd) or user32.GetWindow(hwnd, GW_OWNER)
+                or user32.GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CAPTION != WS_CAPTION or not window_title(hwnd)):
+            return
+        pid = window_pid(hwnd)
+        if any(t.pid == pid for t in self.tabs):
+            return
+        exe = process_path(pid)
+        tool = self.tool_of_exe(exe)
+        self.remote_log(f"つないでいる間に開いた窓をタブにした: {window_title(hwnd)} ({Path(exe).name})")
+        self.adopt(tool["name"] if tool else Path(exe).stem or "窓", hwnd)
 
     def tool_of_exe(self, exe: str) -> dict | None:
         return next((t for t in self.tools if os.path.normcase(t["exe"]) == os.path.normcase(exe)), None)
