@@ -66,4 +66,27 @@ if os.environ.get("VNC_TESTAPP_SECOND"):  # 同じプロセスのもう 1 つの
     second = tk.Toplevel(root)
     second.title(f"vnc-testapp {TAG}-second")
     second.geometry("300x200+700+160")
+if os.environ.get("VNC_TESTAPP_DOCS"):  # Mery のタブの代わり: 文書ごとに別の窓で、切り替えると前の窓を隠して次の窓を出す
+    def to_doc(show, hide) -> None:
+        show.geometry(f"{hide.winfo_width()}x{hide.winfo_height()}+{hide.winfo_x()}+{hide.winfo_y()}")
+        show.deiconify()
+        hide.withdraw()
+
+    def close_doc2() -> None:  # 閉じたら前の文書を出す。「文書 2」で新しい窓として開き直せる
+        global doc2
+        root.deiconify()
+        doc2.destroy()
+        doc2 = make_doc2()
+
+    def make_doc2() -> tk.Toplevel:
+        d = tk.Toplevel(root)
+        d.withdraw()
+        d.title(f"vnc-testapp {TAG}-doc2")
+        d.configure(bg="#e0f2fe")
+        tk.Button(d, text="文書 1", command=lambda: to_doc(root, d)).place(x=260, y=80, width=120, height=60)
+        tk.Button(d, text="閉じる", command=close_doc2).place(x=260, y=160, width=120, height=60)
+        return d
+
+    doc2 = make_doc2()
+    tk.Button(root, text="文書 2", command=lambda: to_doc(doc2, root)).place(x=260, y=80, width=120, height=60)
 root.mainloop()
