@@ -362,7 +362,7 @@ def steps(dock: td.Dock) -> None:
             _, tx, ty, tw, th = RemoteSource_layers(dock)[1]
             s = view.scale
             fit = img.crop((round(tx * s), round(ty * s), round((tx + tw) * s), round((ty + th) * s)))
-            stale = old_zoom_buttons(img)
+            stale = old_zoom_buttons(img, dock, s)
             if (not ck.corners_ok(fit) and is_light(fit) and not stale) or time.monotonic() > deadline:
                 break
             time.sleep(0.2)
@@ -427,6 +427,7 @@ def steps(dock: td.Dock) -> None:
               bool(dock.active) and dock.active.hwnd == later[1] and layer[0] == later[1] and layer[1] >= 0,
               f"選んでいるタブ {dock.active and dock.active.name} {layer}")
         launch_steps(dock, c, apps)
+        grid_steps(dock, c)
         maximize_steps(dock, apps)
         second_window_steps(dock, apps)
         tab_strip_steps(dock, c, apps)
@@ -682,6 +683,76 @@ def launch_steps(dock: td.Dock, c: Client, apps: list) -> None:
     finally:
         del dock.launch
         dock.tools = []
+
+
+def grid_steps(dock: td.Dock, c: Client) -> None:
+    """スマホの「一覧」: 開いているタブを、最後に表に出ていた時の絵で並べ、押すとそのタブに切り替える。
+    隠したタブは撮っても真っ黒なので、表に出ていた間 (タブを切り替える前) に撮って覚えている"""
+    def panel_buttons() -> dict[str, int]:
+        return tk_get(dock, lambda: {w.cget("text"): w.winfo_id() for w in all_widgets(dock.launch_panel)
+                                     if isinstance(w, td.tk.Button)} if dock.launch_panel else {})
+
+    def tap(hwnd: int) -> dict[str, int]:
+        c.tap(*button_pos(dock, hwnd))
+        time.sleep(1.0)
+        return panel_buttons()
+
+    def shown() -> int:
+        layers = RemoteSource_layers(dock)
+        return layers[1][0] if len(layers) > 1 else 0
+
+    grid_button = tk_get(dock, dock.grid_button.winfo_id)
+    check("帯の「一覧」は「+ 開く」の右、タブより左にある",
+          td.rect_of(tk_get(dock, dock.open_button.winfo_id))[0] < td.rect_of(grid_button)[0]
+          < td.rect_of(dock.tabs[0].button_hwnd)[0])
+    # 前の試験で表に出ていたタブ (0 と 1) を選び直して、どちらも隠す前に撮られるようにする
+    for t in dock.tabs[:2]:
+        tap(t.button_hwnd)
+    active = dock.active
+    buttons = tap(grid_button)
+    # 画面の外の Tk は、描き直すまで前の絵 (「+ 開く」の一覧のボタンなど) が少し残る。左の余白が地の色になるまで待つ
+    start = time.monotonic()
+    while True:
+        img = c.full_frame()
+        margin = img.crop((2, 40, 12, img.height - 10)).convert("L")
+        dirty = sum(1 for p in margin.get_flattened_data() if p > 40)
+        if not dirty or time.monotonic() - start > 4:
+            break
+        time.sleep(0.2)
+    img.save(OUT / "remote-7-grid.png")
+    check("「一覧」の画面に前の絵が残らない (左の余白が地の色。4 秒以内)", not dirty,
+          f"明るい画素 {dirty} 待った {time.monotonic() - start + 1:.1f} 秒")
+    names =[t.name + (" (表示中)" if t is active else "") for t in dock.tabs]
+    check("「一覧」で、開いているタブのマスと「戻る」がドックの中に出て、選んでいたツールは隠れる",
+          dock.panel_kind == "grid" and set(buttons) == {*names, "戻る"} and shown() == 0,
+          f"{dock.panel_kind} {list(buttons)} 写しているツール {shown()}")
+    check("表に出ていたタブは絵を覚えている (隠す前に撮った。真っ黒でない)",
+          all(t.thumb and not remote.is_black(t.thumb[2]) for t in dock.tabs[:2]),
+          str([(t.name, t.thumb and t.thumb[:2]) for t in dock.tabs]))
+    _, by, _, bh = td.rect_of(tk_get(dock, dock.body.winfo_id))
+    bottoms = [td.rect_of(h)[1] + td.rect_of(h)[3] for h in buttons.values()]
+    check("マスと「戻る」がドックの中に収まる", max(bottoms) <= by + bh, f"下端 {max(bottoms)} ドックの下 {by + bh}")
+    other = next(t for t in dock.tabs if t is not active)
+    tap(buttons[other.name])
+    check("マスを押すと、そのタブに切り替わって一覧が消える",
+          dock.launch_panel is None and dock.active is other and shown() == other.hwnd,
+          f"一覧 {dock.launch_panel} 選んでいる {dock.active and dock.active.name} 写しているツール {shown()}")
+    buttons = tap(grid_button)
+    tap(buttons["戻る"])
+    check("「戻る」で一覧が消え、元のツールが写る", dock.launch_panel is None and shown() == other.hwnd,
+          f"一覧 {dock.launch_panel} 写しているツール {shown()}")
+    tap(grid_button)
+    tap(tk_get(dock, dock.open_button.winfo_id))
+    kind_open = dock.panel_kind
+    tap(grid_button)
+    kind_grid = dock.panel_kind
+    tap(grid_button)
+    check("「一覧」と「+ 開く」は押すと入れ替わり、開いているほうをもう一度押すと閉じる",
+          (kind_open, kind_grid) == ("open", "grid") and dock.launch_panel is None and shown() == other.hwnd,
+          f"{kind_open} → {kind_grid} → {dock.panel_kind or '閉じた'} 写しているツール {shown()}")
+    check("絵の並べ方: 縦長の場所に 4 つなら 2 列、1 つなら 1 列 (絵がいちばん大きくなる列の数)",
+          td.thumb_grid(4, 400, 700, 1.5)[0] == 2 and td.thumb_grid(1, 400, 700, 1.5)[0] == 1,
+          f"{td.thumb_grid(4, 400, 700, 1.5)} {td.thumb_grid(1, 400, 700, 1.5)}")
 
 
 def maximize_steps(dock: td.Dock, apps: list) -> None:
@@ -1029,8 +1100,7 @@ def edit_steps(dock: td.Dock, c, edit_app) -> None:
     _, he = edit_app
     dock.call_in_tk(lambda: dock.adopt("edit", he))
     time.sleep(1.0)
-    tab_x, tab_y = button_pos(dock, dock.tabs[-1].button_hwnd)
-    c.tap(tab_x, tab_y)
+    tap_tab(dock, c, dock.tabs[-1])
     time.sleep(1.5)
     view = dock.remote_server.view
     _, tx, ty, tw, th = RemoteSource_layers(dock)[1]
@@ -1254,11 +1324,17 @@ def record_keys(dock: td.Dock) -> list[str]:
     return keys
 
 
-def old_zoom_buttons(img) -> int:
-    """67% の画面で、帯の中ほど (100% のときの倍率のボタンがあった所) の明るい画素の数。
-    描き直しが遅れると、前の絵 (「− 縮小 100% + 拡大」) がここに残る。正しく描けていれば帯の地だけで 0
-    (67% の「− 縮小」は 250 より右、2 つ目のタブは 130 より左にある。「+ 開く」は左端)"""
-    return sum(1 for p in img.crop((135, 2, 245, 22)).convert("L").get_flattened_data() if p > 90)
+def old_zoom_buttons(img, dock: td.Dock, scale: float) -> int:
+    """縮小した画面で、帯の最後のタブと「− 縮小」の間 (100% のときの倍率のボタンがあった所) の明るい画素の数。
+    描き直しが遅れると、前の絵 (「− 縮小 100% + 拡大」) がここに残る。正しく描けていれば帯の地だけで 0。
+    間は今のボタンの位置から決める (決め打ちの座標では、帯に「一覧」を足したらタブがかかった)"""
+    ox = remote.client_origin(dock.dock_hwnd)[0]
+    right = td.rect_of(tk_get(dock, dock.zoom_out_button.winfo_id))[0] - ox
+    left = max(r[0] + r[2] for r in (td.rect_of(t.button_hwnd) for t in dock.tabs)) - ox
+    if (right - left) * scale < 8:  # タブが倍率のボタンまで並んで、間が無い
+        return 0
+    return sum(1 for p in img.crop((round(left * scale) + 3, 2, round(right * scale) - 3, 22)).convert("L")
+               .get_flattened_data() if p > 90)
 
 
 def is_light(img) -> bool:
@@ -1304,6 +1380,21 @@ def tk_get(dock: td.Dock, fn):
 
 def RemoteSource_layers(dock: td.Dock) -> list:  # noqa: N802
     return td.RemoteSource(dock).layers()
+
+
+def tap_tab(dock: td.Dock, c, tab: td.Tab) -> None:
+    """帯のタブを押して選ぶ。タブが多くて帯の右の倍率のボタンの下に隠れていたら、スマホでするのと同じく「一覧」から選ぶ
+    (隠れたタブの真ん中を押して「− 縮小」を押してしまい、後の試験が 90% のまま進んだ)"""
+    zoom_left = td.rect_of(tk_get(dock, dock.zoom_frame.winfo_id))[0]
+    x, _, w, _ = td.rect_of(tab.button_hwnd)
+    if x + w <= zoom_left:
+        c.tap(*button_pos(dock, tab.button_hwnd))
+        return
+    c.tap(*button_pos(dock, tk_get(dock, dock.grid_button.winfo_id)))
+    time.sleep(1.0)
+    cell = tk_get(dock, lambda: next(w.winfo_id() for w in all_widgets(dock.launch_panel)
+                                     if isinstance(w, td.tk.Button) and w.cget("text").split(" (")[0] == tab.name))
+    c.tap(*button_pos(dock, cell))
 
 
 def button_pos(dock: td.Dock, hwnd: int) -> tuple[int, int]:

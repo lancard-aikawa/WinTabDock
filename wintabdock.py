@@ -356,6 +356,7 @@ class Tab:
     pid: int = 0  # 窓のプロセス。自動取り込みで、同じプロセスの 2 つ目の窓 (設定画面など) をタブにしないため
     maximized: bool = False  # 取り込む前に最大化していた (外すときに最大化に戻す)
     button_hwnd: int = 0  # タブのボタンの窓。遠隔から押してよい所か見分けるため (別のスレッドから Tk に触らない)
+    thumb: tuple[int, int, bytes] | None = None  # スマホの「一覧」に出す絵 (幅, 高さ, BGRX)。最後に表に出ていた時のもの
 
 
 class RemoteSource:
@@ -486,6 +487,31 @@ def qr_photo(text: str, size: int = 240) -> tk.PhotoImage:
     return img.zoom(max(1, size // n))
 
 
+THUMB_MAX_W = 480  # 覚えておく絵の幅 (一覧に出すときに縮める)。大きいと、タブが多いときに記憶を食う
+
+
+def thumb_grid(n: int, w: int, h: int, aspect: float, label_h: int = 26, gap: int = 10,
+               footer: int = 50) -> tuple[int, int, int]:
+    """n 個の絵を w x h に並べる (列の数, 絵の幅, 絵の高さ)。絵がいちばん大きくなる列の数を選ぶ。
+    aspect は絵の 高さ / 幅 (どのタブもドックの内側いっぱいなので同じ)。下の footer は「戻る」の分"""
+    best = (1, 0, 0)
+    for cols in range(1, max(1, n) + 1):
+        rows = -(-max(1, n) // cols)
+        tw = (w - (cols - 1) * gap) // cols
+        fit_h = (h - footer) // rows - label_h - gap  # 縦に収まる絵の高さ
+        tw = min(tw, int(fit_h / aspect)) if fit_h > 0 else 0
+        if tw > best[1]:
+            best = (cols, tw, max(1, round(tw * aspect)))
+    return best
+
+
+def bgrx_photo(w: int, h: int, bgrx: bytes) -> tk.PhotoImage:
+    """BGRX の絵を Tk の画像にする (PPM にして渡す)。"""
+    rgb = bytearray(w * h * 3)
+    rgb[0::3], rgb[1::3], rgb[2::3] = bgrx[2::4], bgrx[1::4], bgrx[0::4]
+    return tk.PhotoImage(data=b"P6 %d %d 255\n" % (w, h) + bytes(rgb))
+
+
 TAB_BG, TAB_ACTIVE, TAB_FG, TAB_FG_DIM, BAR_BG ="#252542", "#7c3aed", "#ffffff", "#9a9ab8", "#1a1a2e"
 BAR_EDGE = "#7c3aed"  # 帯の下の区切り線と「設定」の枠 (アイコンの縁取りと同系の紫)
 
@@ -510,7 +536,8 @@ class Dock:
         self._remote_notice: tk.Toplevel | None = None  # つないでいる間、PC の画面に出す知らせ
         self._remote_geometry: str | None = None  # 遠隔からつないでいる間 (ドックを画面の外に置く間) の、元の大きさ・位置
         self.remote_moved: dict[int, tuple[int, int]] = {}  # つないでいる間にドックの上へ移したツールの小窓 → 元の位置
-        self.launch_panel: tk.Frame | None = None  # スマホの「+ 開く」で、ドックの中に出すツールの一覧
+        self.launch_panel: tk.Frame | None = None  # スマホの「+ 開く」「一覧」で、ドックの中に出す一覧
+        self.panel_kind = ""  # その一覧がどちらか ("open" / "grid")
         self.launch_hwnds: set[int] = set()  # その一覧のボタン (遠隔から押してよい)
         self._tk_calls: queue.SimpleQueue = queue.SimpleQueue()  # 別のスレッドから Tk で動かしてほしいこと
         self.dock_hwnd = 0
@@ -551,13 +578,19 @@ class Dock:
         self.open_button = tk.Button(self.open_frame, text="+ 開く", command=self.toggle_launch_panel, bd=0,
                                      **{**zoom_button, "bg": BAR_BG})
         self.open_button.pack()
+        # 「一覧」: 開いているタブを絵で並べて選ぶ (Windows の Win+Tab のように)。「+ 開く」と同じ紫の枠
+        self.grid_frame = tk.Frame(self.bar, bg=BAR_EDGE, padx=1, pady=1)
+        self.grid_button = tk.Button(self.grid_frame, text="一覧", command=self.toggle_grid_panel, bd=0,
+                                     **{**zoom_button, "bg": BAR_BG})
+        self.grid_button.pack()
         self.zoom_out_button = tk.Button(self.zoom_frame, text="− 縮小", command=lambda: self.change_zoom(-1), **zoom_button)
         self.zoom_out_button.pack(side=tk.LEFT, padx=(8, 0), pady=4)
         self.zoom_label = tk.Label(self.zoom_frame, bg=BAR_BG, fg=TAB_FG_DIM, width=5)  # 今の倍率 (押せない表示)
         self.zoom_label.pack(side=tk.LEFT)
         self.zoom_in_button = tk.Button(self.zoom_frame, text="+ 拡大", command=lambda: self.change_zoom(1), **zoom_button)
         self.zoom_in_button.pack(side=tk.LEFT, padx=(0, 8), pady=4)
-        self.zoom_hwnds = {self.open_button.winfo_id(), self.zoom_out_button.winfo_id(), self.zoom_in_button.winfo_id()}
+        self.zoom_hwnds = {self.open_button.winfo_id(), self.grid_button.winfo_id(), self.zoom_out_button.winfo_id(),
+                           self.zoom_in_button.winfo_id()}
         self.show_zoom()
         # タブの帯と、取り込んだツールの窓の境目。ツールの上端にも帯と似た見た目 (タブや「設定」) があると、
         # どこまでがドックか分かりにくかった
@@ -812,6 +845,8 @@ class Dock:
             t.button.configure(bg=TAB_ACTIVE if on else TAB_BG, fg=TAB_FG if on else TAB_FG_DIM,
                                font=("", 9, "bold" if on else "normal"))
             if not on:
+                if t is self.active:
+                    self.remember_thumb(t)  # 隠すと真っ黒にしか写らないので、隠す前に撮っておく
                 user32.ShowWindow(t.hwnd, SW_HIDE)
         self.active = tab
         self.place_active(show=True)
@@ -1300,6 +1335,7 @@ class Dock:
             # タブより先に場所を取る (タブが多いと、後から並べた帯の右端のボタンが切れて押せなかった)
             self.zoom_frame.pack(side=tk.RIGHT, before=self.tabs_frame)
             self.open_frame.pack(side=tk.LEFT, padx=(8, 4), pady=4, before=self.tabs_frame)
+            self.grid_frame.pack(side=tk.LEFT, padx=(0, 4), pady=4, before=self.tabs_frame)
             self.empty.config(text="左上の「+ 開く」からツールを開きます")
             x = user32.GetSystemMetrics(76) + user32.GetSystemMetrics(78) + 100  # 仮想画面の右端の外
             self.root.geometry(f"+{x}+{user32.GetSystemMetrics(77)}")
@@ -1315,6 +1351,9 @@ class Dock:
             self.empty.config(text="右上の「+ 起動 / 取り込む」からツールを開きます")
             self.zoom_frame.pack_forget()
             self.open_frame.pack_forget()
+            self.grid_frame.pack_forget()
+            for t in self.tabs:
+                t.thumb = None  # スマホのためだけに覚えていた絵。PC では使わない
             self.pack_bar_buttons()
             self.root.maxsize(*self._remote_maxsize)
             self.root.geometry(geometry)
@@ -1355,19 +1394,77 @@ class Dock:
         self.zoom_in_button.config(state=tk.DISABLED if z == self.ZOOMS[-1] else tk.NORMAL)
 
     def toggle_launch_panel(self) -> None:
-        if self.launch_panel:
+        if self.launch_panel and self.panel_kind == "open":
             self.close_launch_panel()
         else:
+            self.close_launch_panel(show=False)  # 「一覧」を開いていたら閉じて入れ替える
             self.open_launch_panel()
 
-    def open_launch_panel(self) -> None:
-        """スマホの「+ 開く」: ツールの起動・切り替えと、選んでいるツールを閉じるボタンを、ドックの中に並べる。
-        ツールの窓はドックより手前にあるので、開いている間は隠す (遠隔の画面にも写らない)"""
+    def toggle_grid_panel(self) -> None:
+        if self.launch_panel and self.panel_kind == "grid":
+            self.close_launch_panel()
+        else:
+            self.close_launch_panel(show=False)
+            self.open_grid_panel()
+
+    def remember_thumb(self, tab: Tab) -> None:
+        """スマホとつないでいる間、表に出ているタブの絵を撮って覚える (「一覧」に出す)。"""
+        if self._remote_geometry and user32.IsWindowVisible(tab.hwnd):
+            tab.thumb = remote.snapshot(tab.hwnd, THUMB_MAX_W) or tab.thumb
+
+    def new_panel(self, kind: str) -> tk.Frame:
+        """ドックの中いっぱいに一覧の台を出す。ツールの窓はドックより手前にあるので、開いている間は隠す
+        (遠隔の画面にも写らない)。隠す前に絵を撮っておく"""
         if self.active:
+            self.remember_thumb(self.active)
             user32.ShowWindow(self.active.hwnd, SW_HIDE)
         panel = tk.Frame(self.body, bg="#0d0d1a", padx=16, pady=12)
         panel.place(relx=0, rely=0, relwidth=1, relheight=1)
-        self.launch_panel = panel
+        self.launch_panel, self.panel_kind = panel, kind
+        return panel
+
+    def open_grid_panel(self) -> None:
+        """スマホの「一覧」: 開いているタブを、最後に表に出ていた時の絵で並べる。押すとそのタブに切り替える。
+        隠したタブは撮っても真っ黒なので、つないでから一度も表に出ていないタブは名前だけのマスにする"""
+        _, _, bw, bh = self.body_rect()
+        panel = self.new_panel("grid")
+        w, h = bw - 32, bh - 24  # panel の padx / pady の分
+        label_h = 26
+        cols, tw, th = thumb_grid(len(self.tabs), w, h, bh / max(1, bw), label_h=label_h)
+        grid = tk.Frame(panel, bg="#0d0d1a")
+        grid.pack(side=tk.TOP)
+        photos = []
+        buttons = []
+        for i, t in enumerate(self.tabs):
+            on = t is self.active
+            if t.thumb and tw > 0:
+                img = bgrx_photo(tw, th, remote.shrink(t.thumb[2], t.thumb[0], t.thumb[1], tw, th))
+            else:
+                img = tk.PhotoImage(width=max(1, tw), height=th)  # 絵の無いマス (名前だけ)
+                img.put("#30304d", to=(0, 0, max(1, tw), th))
+            photos.append(img)
+            # 押せるマス: 塗り (表示中は紫) と指のカーソル。絵の下に名前
+            b = tk.Button(grid, image=img, text=f"{t.name} (表示中)" if on else t.name, compound=tk.TOP,
+                          bg=TAB_ACTIVE if on else TAB_BG, activebackground="#6d28d9" if on else TAB_ACTIVE,
+                          fg=TAB_FG, activeforeground=TAB_FG, relief=tk.FLAT, bd=0, padx=4, pady=4,
+                          cursor="hand2", font=("", 10), wraplength=max(40, tw),
+                          command=lambda t=t: self.root.after(0, lambda: self.select(t)))
+            b.grid(row=i // cols, column=i % cols, padx=5, pady=5)
+            buttons.append(b)
+        if not self.tabs:
+            tk.Label(panel, text="開いているタブがありません (「+ 開く」から起動します)", bg="#0d0d1a",
+                     fg=TAB_FG_DIM).pack(side=tk.TOP, pady=12)
+        back = tk.Button(panel, text="戻る", bg=TAB_BG, activebackground=TAB_ACTIVE, fg=TAB_FG, activeforeground=TAB_FG,
+                         relief=tk.FLAT, font=("", 11), padx=24, pady=6, cursor="hand2",
+                         command=lambda: self.root.after(0, self.close_launch_panel))
+        back.pack(side=tk.TOP, pady=(8, 0))
+        buttons.append(back)
+        panel.photos = photos  # Tk の画像は Python の側で持っていないと消える
+        self.launch_hwnds = {b.winfo_id() for b in buttons}
+
+    def open_launch_panel(self) -> None:
+        """スマホの「+ 開く」: ツールの起動・切り替えと、選んでいるツールを閉じるボタンを、ドックの中に並べる。"""
+        panel = self.new_panel("open")
         button = {"relief": tk.FLAT, "fg": TAB_FG, "font": ("", 11), "anchor": tk.W, "padx": 12, "pady": 8,
                   "cursor": "hand2"}
         buttons = []
@@ -1406,11 +1503,11 @@ class Dock:
         self.launch_hwnds = {b.winfo_id() for b in buttons}
 
     def close_launch_panel(self, show: bool = True) -> None:
-        """「+ 開く」の一覧を消す。show なら隠していたツールを出し直す (ツールを選び直すときは、選ぶ側が出す)"""
+        """「+ 開く」「一覧」の一覧を消す。show なら隠していたツールを出し直す (ツールを選び直すときは、選ぶ側が出す)"""
         if not self.launch_panel:
             return
         self.launch_panel.destroy()
-        self.launch_panel = None
+        self.launch_panel, self.panel_kind = None, ""
         self.launch_hwnds = set()
         if show:
             self.place_active(show=True)

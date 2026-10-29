@@ -273,6 +273,40 @@ def compose(layers: list[Layer], fb_w: int, fb_h: int, scale: float) -> bytes:
         _u.ReleaseDC(None, screen)
 
 
+def snapshot(hwnd: int, max_w: int) -> tuple[int, int, bytes] | None:
+    """窓の内側を、幅 max_w 以下に縮めて撮る (幅, 高さ, BGRX)。隠した窓は真っ黒に写る (Tk も Edge も) ので None。"""
+    w, h = client_size(hwnd)
+    if w <= 0 or h <= 0:
+        return None
+    scale = min(1.0, max_w / w)
+    tw, th = max(1, round(w * scale)), max(1, round(h * scale))
+    data = compose([(hwnd, 0, 0, w, h)], tw, th, scale)
+    return None if is_black(data) else (tw, th, data)
+
+
+def shrink(bgrx: bytes, w: int, h: int, tw: int, th: int) -> bytes:
+    """BGRX の絵を tw x th に縮める (GDI の HALFTONE。間引くより読みやすい)。"""
+    screen = _u.GetDC(None)
+    src_dc, dst_dc = gdi32.CreateCompatibleDC(screen), gdi32.CreateCompatibleDC(screen)
+    src_bmp, src_bits = _dib(src_dc, w, h)
+    dst_bmp, dst_bits = _dib(dst_dc, tw, th)
+    old_src, old_dst = gdi32.SelectObject(src_dc, src_bmp), gdi32.SelectObject(dst_dc, dst_bmp)
+    try:
+        ctypes.memmove(src_bits, bgrx, w * h * 4)
+        gdi32.SetStretchBltMode(dst_dc, HALFTONE)
+        gdi32.SetBrushOrgEx(dst_dc, 0, 0, None)
+        gdi32.StretchBlt(dst_dc, 0, 0, tw, th, src_dc, 0, 0, w, h, SRCCOPY)
+        return ctypes.string_at(dst_bits, tw * th * 4)
+    finally:
+        gdi32.SelectObject(src_dc, old_src)
+        gdi32.SelectObject(dst_dc, old_dst)
+        gdi32.DeleteObject(src_bmp)
+        gdi32.DeleteObject(dst_bmp)
+        gdi32.DeleteDC(src_dc)
+        gdi32.DeleteDC(dst_dc)
+        _u.ReleaseDC(None, screen)
+
+
 # ── 見せるもの (ドックが用意する) ─────────────────────────────────────────────
 
 class Source(Protocol):
