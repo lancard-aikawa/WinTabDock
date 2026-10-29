@@ -22,6 +22,7 @@ import os
 import socket
 import ssl
 import struct
+import subprocess
 import sys
 import tempfile
 import threading
@@ -42,6 +43,7 @@ from PIL import Image  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "experiments"))
 import remote  # noqa: E402
+import uia  # noqa: E402
 import vnc_probe_check as ck  # noqa: E402  (試験用の窓を起動する手順を借りる)
 import wintabdock as td  # noqa: E402
 
@@ -379,6 +381,7 @@ def steps(dock: td.Dock) -> None:
         size = remote.client_size(dock.dock_hwnd)
         check("「+ 拡大」で 100% に戻り、ドックも 411x772 に戻る", dock.remote_zoom == 1.0 and size == (411, 772),
               f"倍率 {dock.remote_zoom} ドック {size}")
+        wheel_steps(dock, c, h1)
 
         tab2_x, tab2_y = button_pos(dock, dock.tabs[1].button_hwnd)
         c.tap(tab2_x, tab2_y)
@@ -427,6 +430,7 @@ def steps(dock: td.Dock) -> None:
         maximize_steps(dock, apps)
         second_window_steps(dock, apps)
         tab_strip_steps(dock, c, apps)
+        explorer_steps(dock, c)
 
         c.close()
         c = None
@@ -926,6 +930,98 @@ def tab_strip_steps(dock: td.Dock, c, apps: list) -> None:
         td.user32.PostMessageW(h, 0x0010, 0, 0)  # WM_CLOSE
 
 
+def wheel_steps(dock: td.Dock, c, h1: int) -> None:
+    """スマホの 2 本指でなぞると、noVNC はホイールを送る (上下 8・16、左右 32・64)。VS Code のスクロールバーは細くて
+    押しにくい (ユーザーの報告、2026-10-30)。縦も横もツールに届く"""
+    _, tx, ty, tw, th = RemoteSource_layers(dock)[1]
+    s = dock.remote_server.view.scale
+    x, y = round((tx + tw // 2) * s), round((ty + th - 60) * s)
+    for bit in (8, 16, 32, 64):
+        c.send(struct.pack(">BBHH", 5, bit, x, y))
+        c.send(struct.pack(">BBHH", 5, 0, x, y))
+        time.sleep(0.2)
+    # Tk は横のホイールの向きを裏返す (左へ = 32 = WM_MOUSEHWHEEL の負 が、Tk では正)。Edge では 64 で右へ動いた
+    title = ck.wait_title(h1, "wheel=v+,v-,h+,h-")
+    check("2 本指でなぞったホイール (縦・横) がツールに届く", title.endswith("wheel=v+,v-,h+,h-"), title)
+
+
+def explorer_steps(dock: td.Dock, c) -> None:
+    """エクスプローラーの上の部分 (「…」「表示」など) とそのメニューは、本物のマウスしか受けない窓
+    (Microsoft.UI.Content.*SiteBridge) なので、UI Automation で押す。メニューは小窓としてスマホの画面に出す。
+    エクスプローラーはタスクバー・デスクトップと同じ explorer.exe のことがあり、それらまで小窓として拾っていた"""
+    first_tab = td.rect_of(dock.tabs[0].button_hwnd)[0]
+    open_x = td.rect_of(tk_get(dock, dock.open_button.winfo_id))[0]
+    check("「+ 開く」は帯の左端 (タブより左) にある (窓が多いと、右の端で隠れた)", open_x < first_tab,
+          f"「+ 開く」x={open_x} 最初のタブ x={first_tab}")
+    folder = HOME / "explorer-test"
+    folder.mkdir(exist_ok=True)
+    before = set(all_windows())
+    subprocess.Popen(["explorer.exe", str(folder)])
+    he = 0
+    for _ in range(60):
+        he = next((h for h in all_windows() if h not in before and window_class(h) == "CabinetWClass"
+                   and "explorer-test" in td.window_title(h)), 0)
+        if he:
+            break
+        time.sleep(0.25)
+    if not he:
+        check("エクスプローラーの窓が開く", False, "15 秒待っても出ない")
+        return
+    try:
+        dock.call_in_tk(lambda: dock.adopt("explorer", he))
+        time.sleep(2.0)
+        picked = [window_class(h) for h in td.tool_popups(he, {t.hwnd for t in dock.tabs} | {dock.dock_hwnd})]
+        check("エクスプローラーのタブに、タスクバーとデスクトップを小窓として重ねない",
+              not {"Shell_TrayWnd", "Progman", "WorkerW"} & set(picked), str(picked))
+        bridge = next((h for h in child_windows(he) if window_class(h) == "Microsoft.UI.Content.DesktopChildSiteBridge"), 0)
+        more = None
+        if bridge:
+            arr = uia._elements(bridge)
+            n = ctypes.c_int()
+            uia._call(arr, uia._ARR_LENGTH, [ctypes.POINTER(ctypes.c_int)], ctypes.byref(n))
+            for i in range(n.value):
+                el = ctypes.c_void_p()
+                uia._call(arr, uia._ARR_GET, [ctypes.c_int, uia._PP], i, ctypes.byref(el))
+                if uia._name(el) in ("その他のオプション", "See more"):
+                    more = uia._rect(el)
+                uia._release(el)
+            uia._release(arr)
+        if not more:
+            check("エクスプローラーの「…」(その他のオプション) が見つかる", False, f"bridge={bridge}")
+            return
+        layer = next(lay for lay in RemoteSource_layers(dock) if lay[0] == he)
+        ox, oy = remote.client_origin(he)
+        s = dock.remote_server.view.scale
+        c.tap(round((layer[1] + (more[0] + more[2]) // 2 - ox) * s), round((layer[2] + (more[1] + more[3]) // 2 - oy) * s))
+        menus = []
+        for _ in range(20):
+            time.sleep(0.25)
+            menus = [lay for lay in RemoteSource_layers(dock)
+                     if window_class(lay[0]) == "Microsoft.UI.Content.PopupWindowSiteBridge"]
+            if menus:
+                break
+        img = c.full_frame()
+        img.save(OUT / "remote-6-explorer.png")
+        # 画面より広いメニューは右が切れる (左端を揃える)
+        w, h = remote.client_size(dock.dock_hwnd)
+        check("エクスプローラーの「…」を押すとメニューが開き、遠隔の画面に重なる (見える所にある)",
+              bool(menus) and all(0 <= lay[1] < w and 0 <= lay[2] < h for lay in menus), str(menus))
+        # メニューの外 (ファイルの一覧の下のほう) を押すと閉じる
+        c.tap(round((layer[1] + layer[3] - 40) * s), round((layer[2] + layer[4] - 60) * s))
+        for _ in range(20):
+            time.sleep(0.25)
+            menus = [lay for lay in RemoteSource_layers(dock)
+                     if window_class(lay[0]) == "Microsoft.UI.Content.PopupWindowSiteBridge"]
+            if not menus:
+                break
+        check("メニューの外を押すと閉じる", not menus, str(menus))
+    finally:
+        t = next((t for t in dock.tabs if t.hwnd == he), None)
+        if t:
+            dock.call_in_tk(lambda: dock.release(t))
+        td.user32.PostMessageW(he, 0x0010, 0, 0)  # WM_CLOSE (試験で開いた窓)
+
+
 def edit_steps(dock: td.Dock, c, edit_app) -> None:
     """Tk でない窓 (EDIT。BackSpace などを WM_CHAR で処理する作り) に、スマホの日本語の入力と同じ並びで打つ。
     Mery で、BackSpace の後の文字が先に処理されて「にほ」が残った (受け取りの列に置いていたので、翻訳で後ろに作られる
@@ -1160,9 +1256,9 @@ def record_keys(dock: td.Dock) -> list[str]:
 
 def old_zoom_buttons(img) -> int:
     """67% の画面で、帯の中ほど (100% のときの倍率のボタンがあった所) の明るい画素の数。
-    描き直しが遅れると、前の絵 (「+ 開く − 縮小 100% + 拡大」) がここに残る。正しく描けていれば帯の地だけで 0
-    (67% の「+ 開く」は 250 より右にある)"""
-    return sum(1 for p in img.crop((110, 2, 245, 22)).convert("L").get_flattened_data() if p > 90)
+    描き直しが遅れると、前の絵 (「− 縮小 100% + 拡大」) がここに残る。正しく描けていれば帯の地だけで 0
+    (67% の「− 縮小」は 250 より右、2 つ目のタブは 130 より左にある。「+ 開く」は左端)"""
+    return sum(1 for p in img.crop((135, 2, 245, 22)).convert("L").get_flattened_data() if p > 90)
 
 
 def is_light(img) -> bool:

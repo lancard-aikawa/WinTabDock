@@ -36,6 +36,7 @@ from pathlib import Path
 import qrcodegen  # QR コードを作る (Project Nayuki、MIT。1 ファイルを同梱)
 import remote
 import tlscert  # 遠隔の HTTPS の証明書を作る (標準ライブラリだけ)
+import uia  # 本物のマウスしか受けない部品 (エクスプローラーの上の部分) を押す
 
 # ── Win32 ────────────────────────────────────────────────────────────────────
 
@@ -403,6 +404,14 @@ class RemoteSource:
             self.dock.remote_moved.setdefault(hwnd, (left, top))
             user32.SetWindowPos(hwnd, None, ox + nx, oy + ny, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
 
+    def moved_by(self, hwnd: int) -> tuple[int, int]:
+        """_bring_in で小窓を動かした量 (動かしていなければ 0, 0)。"""
+        orig = self.dock.remote_moved.get(hwnd)
+        if not orig:
+            return 0, 0
+        left, top, _, _ = rect_of(hwnd)
+        return left - orig[0], top - orig[1]
+
     def extent(self) -> tuple[int, int]:
         layers = self.layers()[:2]  # ドックと選んでいるツール (ダイアログははみ出したら切る)
         return max(x + w for _, x, _, w, _ in layers), max(y + h for _, _, y, _, h in layers)
@@ -440,21 +449,25 @@ def is_app_window(hwnd: int) -> bool:
 
 
 def tool_popups(hwnd: int, exclude: set[int]) -> list[int]:
-    """ツール hwnd が出した、見えている窓 (ダイアログなど)。hwnd が持ち主の窓と、同じプロセスのほかの窓
+    """ツール hwnd が出した、見えている窓 (ダイアログなど)。hwnd が持ち主の窓と、同じスレッドのほかの窓
     (持ち主の無い小窓もある)。exclude (タブにしている窓・ドック) と、大きさの無い窓 (Delphi の TApplication) は除く。
-    同じプロセスでも、普通のアプリの窓は除く。VS Code はどの窓も 1 つのプロセスなので、ほかの VS Code の窓まで
-    小窓としてドックの上へ移し、スマホの画面では帯ごと覆った (ユーザーの報告、2026-10-28)"""
-    pid = window_pid(hwnd)
+    同じスレッドでも、普通のアプリの窓は除く。VS Code はどの窓も 1 つのプロセスなので、ほかの VS Code の窓まで
+    小窓としてドックの上へ移し、スマホの画面では帯ごと覆った (ユーザーの報告、2026-10-28)。
+    プロセスでなくスレッドで見る。エクスプローラーの窓はタスクバー・デスクトップと同じ explorer.exe なので、
+    プロセスで見るとタスクバーとデスクトップ (Shell_TrayWnd・Progman) まで小窓としてドックの上へ移した (2026-10-30)"""
+    tid = user32.GetWindowThreadProcessId(hwnd, None)
     found: list[int] = []
-    buf = ctypes.create_unicode_buffer(32)
+    buf = ctypes.create_unicode_buffer(64)
 
     def cb(h, _):
         if h == hwnd or h in exclude or not user32.IsWindowVisible(h):
             return True
-        if user32.GetWindow(h, GW_OWNER) == hwnd or (window_pid(h) == pid and not is_app_window(h)):
-            user32.GetClassNameW(h, buf, 32)
+        if user32.GetWindow(h, GW_OWNER) == hwnd or (user32.GetWindowThreadProcessId(h, None) == tid
+                                                     and not is_app_window(h)):
+            user32.GetClassNameW(h, buf, 64)
             _, _, w, hh = rect_of(h)
-            if buf.value not in NOT_POPUPS and w > 0 and hh > 0:
+            if buf.value not in NOT_POPUPS and w > 0 and hh > 0 \
+                    and not (buf.value in uia.BRIDGE_CLASSES and uia.is_tooltip(h)):
                 found.append(h)
         return True
 
@@ -532,14 +545,14 @@ class Dock:
         zoom_button = {"bg": TAB_BG, "fg": TAB_FG, "relief": tk.FLAT, "activebackground": TAB_ACTIVE,
                        "disabledforeground": "#55557a", "padx": 8, "cursor": "hand2"}
         # 「+ 起動」はメニュー (別の窓) を出すので遠隔からは使えない。代わりにドックの中に一覧を出す。
-        # 選んでいるタブ (紫の塗り) と並ぶので、塗りでなく「設定」と同じ紫の枠で見分ける (塗りにしたら、タブとつながって見えた)
-        open_frame = tk.Frame(self.zoom_frame, bg=BAR_EDGE, padx=1, pady=1)
-        open_frame.pack(side=tk.LEFT, padx=(8, 8), pady=4)
-        self.open_button = tk.Button(open_frame, text="+ 開く", command=self.toggle_launch_panel, bd=0,
+        # 選んでいるタブ (紫の塗り) と並ぶので、塗りでなく「設定」と同じ紫の枠で見分ける (塗りにしたら、タブとつながって見えた)。
+        # 帯の左端に置く (右の倍率のボタンと並べていたら、窓が多いときに隠れた。ユーザーの報告、2026-10-30)
+        self.open_frame = tk.Frame(self.bar, bg=BAR_EDGE, padx=1, pady=1)
+        self.open_button = tk.Button(self.open_frame, text="+ 開く", command=self.toggle_launch_panel, bd=0,
                                      **{**zoom_button, "bg": BAR_BG})
         self.open_button.pack()
         self.zoom_out_button = tk.Button(self.zoom_frame, text="− 縮小", command=lambda: self.change_zoom(-1), **zoom_button)
-        self.zoom_out_button.pack(side=tk.LEFT, pady=4)
+        self.zoom_out_button.pack(side=tk.LEFT, padx=(8, 0), pady=4)
         self.zoom_label = tk.Label(self.zoom_frame, bg=BAR_BG, fg=TAB_FG_DIM, width=5)  # 今の倍率 (押せない表示)
         self.zoom_label.pack(side=tk.LEFT)
         self.zoom_in_button = tk.Button(self.zoom_frame, text="+ 拡大", command=lambda: self.change_zoom(1), **zoom_button)
@@ -1286,7 +1299,8 @@ class Dock:
             self.show_zoom()
             # タブより先に場所を取る (タブが多いと、後から並べた帯の右端のボタンが切れて押せなかった)
             self.zoom_frame.pack(side=tk.RIGHT, before=self.tabs_frame)
-            self.empty.config(text="右上の「+ 開く」からツールを開きます")
+            self.open_frame.pack(side=tk.LEFT, padx=(8, 4), pady=4, before=self.tabs_frame)
+            self.empty.config(text="左上の「+ 開く」からツールを開きます")
             x = user32.GetSystemMetrics(76) + user32.GetSystemMetrics(78) + 100  # 仮想画面の右端の外
             self.root.geometry(f"+{x}+{user32.GetSystemMetrics(77)}")
             threading.Thread(target=self._keep_tk_awake, daemon=True).start()
@@ -1300,6 +1314,7 @@ class Dock:
             self.close_launch_panel(show=False)  # 下で選んでいるツールを出し直す
             self.empty.config(text="右上の「+ 起動 / 取り込む」からツールを開きます")
             self.zoom_frame.pack_forget()
+            self.open_frame.pack_forget()
             self.pack_bar_buttons()
             self.root.maxsize(*self._remote_maxsize)
             self.root.geometry(geometry)

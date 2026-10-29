@@ -27,9 +27,17 @@ if len(sys.argv) > 2:  # 最小の幅 (PortWho・LPortMan のように、それ�
     root.minsize(int(sys.argv[2]), 1)
 
 
+wheels: list[str] = []  # 受けたホイール (直近 4 つ)。縦は v、横 (Tk では Shift 付き) は h、向きは delta の符号
+
+
 def update_title(*_):
     root.title(f"vnc-testapp {TAG} count={count} text={text.get()} size={root.winfo_width()}x{root.winfo_height()}"
-               f" ev={','.join(events[-6:])}")
+               f" ev={','.join(events[-6:])} wheel={','.join(wheels[-4:])}")
+
+
+def wheel(ev):
+    wheels.append(("h" if ev.state & 1 else "v") + ("+" if ev.delta > 0 else "-"))
+    update_title()
 
 
 LOG = os.environ.get("VNC_TESTAPP_LOG")  # 受けた出来事を全部書き出す (試験が時々落ちるのを調べる)
@@ -61,6 +69,7 @@ root.bind("<Configure>", update_title)
 entry.bind("<Control-s>", lambda e: (text.set(text.get() + "[S]"), entry.icursor("end"), "break")[-1])  # Ctrl を遠隔から
 for seq in ("<ButtonPress>", "<ButtonRelease>", "<Enter>", "<Leave>", "<KeyPress>", "<FocusIn>") + (("<FocusOut>",) if LOG else ()):
     root.bind_all(seq, note, add="+")
+root.bind_all("<MouseWheel>", wheel, add="+")
 update_title()
 if os.environ.get("VNC_TESTAPP_SECOND"):  # 同じプロセスのもう 1 つの普通の窓 (VS Code の 2 つ目の窓の代わり)
     second = tk.Toplevel(root)

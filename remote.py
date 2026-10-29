@@ -34,6 +34,7 @@ from ctypes import wintypes
 from pathlib import Path
 from typing import Callable, Protocol
 
+import uia
 from keysyms import KEYSYM_TO_CODEPOINT
 
 DEFAULT_PORT = 15900  # LPortMan の台帳に登録
@@ -124,7 +125,7 @@ SEND_TIMEOUT_MS = 5000
 WM_ACTIVATE, WA_ACTIVE, WM_SETFOCUS = 0x0006, 1, 0x0007
 WM_NULL, WM_KEYDOWN, WM_KEYUP, WM_CHAR, WM_UNICHAR = 0x0000, 0x0100, 0x0101, 0x0102, 0x0109
 WM_SYSKEYDOWN, WM_SYSKEYUP = 0x0104, 0x0105
-WM_MOUSEMOVE, WM_MOUSEWHEEL = 0x0200, 0x020A
+WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOUSEHWHEEL = 0x0200, 0x020A, 0x020E
 # メニューの窓 (#32768) へのメッセージ (文書には無いが、Windows 自身がメニューの窓に使う)。項目の番号を渡す
 MN_GETHMENU, MN_SELECTITEM, MN_CANCELMENUS, MN_BUTTONDOWN, MN_BUTTONUP = 0x01E1, 0x01E5, 0x01E6, 0x01ED, 0x01EF
 SWP_NOSIZE, SWP_NOZORDER, SWP_NOACTIVATE = 0x0001, 0x0004, 0x0010
@@ -532,6 +533,15 @@ class WindowInput:
                 input_log(f"tab {tab} of {child}")
                 self.blocked = True  # 離すまで何も送らない
                 return
+            if class_name(child) in uia.BRIDGE_CLASSES:
+                # 本物のマウスしか受けない窓 (エクスプローラーの上の部分・そのメニュー)。UI Automation で押す。
+                # 部品の位置は、ドックが小窓を見える所へ移す前の位置のまま (移しても中の部品の位置は変わらない)
+                ox, oy = client_origin(child)
+                dx, dy = getattr(self.view.source, "moved_by", lambda h: (0, 0))(top)
+                done = uia.press_at(child, ox + cx - dx, oy + cy - dy)
+                input_log(f"uia {done} in {child}")
+                self.blocked = True
+                return
         mk = sum(BUTTON_MSGS[b][2] for b in BUTTON_MSGS if mask & b)
         mk |= (0x0004 if 0x10 in self.mod_vks() else 0) | (0x0008 if 0x11 in self.mod_vks() else 0)  # MK_SHIFT・MK_CONTROL
         msgs = [(WM_MOUSEMOVE, mk, lparam_xy(cx, cy))]
@@ -545,10 +555,13 @@ class WindowInput:
                 msgs.append((up, mk, lparam_xy(cx, cy)))
         if not mask & 7:
             self.press = None
-        for bit, delta in ((8, 120), (16, -120)):  # ホイールは押した瞬間だけ。座標は画面の座標
+        # ホイールは押した瞬間だけ。座標は画面の座標。noVNC はスマホの 2 本指でなぞると、上下を 8・16、
+        # 左右を 32 (左)・64 (右) で送る
+        for bit, msg, delta in ((8, WM_MOUSEWHEEL, 120), (16, WM_MOUSEWHEEL, -120),
+                                (32, WM_MOUSEHWHEEL, -120), (64, WM_MOUSEHWHEEL, 120)):
             if mask & bit and not self.buttons & bit:
                 sx, sy = client_origin(top)
-                msgs.append((WM_MOUSEWHEEL, (delta & 0xFFFF) << 16 | mk, lparam_xy(sx + cx, sy + cy)))
+                msgs.append((msg, (delta & 0xFFFF) << 16 | mk, lparam_xy(sx + cx, sy + cy)))
         tid = _u.GetWindowThreadProcessId(top, None)
         me = kernel32.GetCurrentThreadId()
         attached = _u.AttachThreadInput(me, tid, True)
@@ -833,6 +846,12 @@ kernel32.VirtualFreeEx.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_si
 kernel32.WriteProcessMemory.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t,
                                         ctypes.c_void_p]
 kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+
+def class_name(hwnd: int) -> str:
+    buf = ctypes.create_unicode_buffer(64)
+    _u.GetClassNameW(hwnd, buf, 64)
+    return buf.value
 
 
 def tab_at(hwnd: int, x: int, y: int) -> int | None:
