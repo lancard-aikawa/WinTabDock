@@ -25,6 +25,8 @@ env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
 names = sys.argv[1:]
 tools, _ = td.load_config()
 exes = [t["exe"] for t in tools if t["name"] in names]
+if not names or len(exes) != len(names):  # 名前なしで流すと、ツール 0 個で PASS と出た
+    sys.exit(f"wintabdock.toml に登録したツールの名前を渡す ({names})\n{__doc__}")
 
 
 def step(mode: str, label: str) -> bool:

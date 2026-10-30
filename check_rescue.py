@@ -19,6 +19,8 @@ import time
 import wintabdock as td
 
 sys.stdout.reconfigure(encoding="utf-8")
+if len(sys.argv) != 2:
+    sys.exit(f"wintabdock.toml に登録したツールの名前を 1 つ渡す\n{__doc__}")
 name = sys.argv[1]
 out = subprocess.run([sys.executable, "wintabdock.py", "--selftest", "crash", name], capture_output=True, text=True,
                      encoding="utf-8", env={**td.os.environ, "PYTHONIOENCODING": "utf-8"})

@@ -22,6 +22,8 @@ import wintabdock as td
 
 sys.stdout.reconfigure(encoding="utf-8")
 env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+if len(sys.argv) != 3:
+    sys.exit(f"wintabdock.toml に登録したツールの名前を 2 つ渡す\n{__doc__}")
 first, second = sys.argv[1], sys.argv[2]
 session = td.STATE_DIR / "session-selftest.json"
 prefs = td.STATE_DIR / "settings-selftest.json"

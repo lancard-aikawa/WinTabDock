@@ -25,6 +25,8 @@ from selftest import count_processes, on_taskbar, taskbar_names
 sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
 names = sys.argv[1:]
 tools = [t for t in td.load_config()[0] if t["name"] in names]
+if not names or len(tools) != len(names):  # 名前なしで流すと、ツール 0 個で FAIL・PASS がもっともらしく出た
+    sys.exit(f"wintabdock.toml に登録したツールの名前を渡す ({names} のうち見つかったもの: {[t['name'] for t in tools]})\n{__doc__}")
 results = []
 
 
