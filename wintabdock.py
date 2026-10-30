@@ -17,7 +17,7 @@
 
 from __future__ import annotations
 
-__version__ = "0.2.0"  # 版を上げるときは CHANGELOG.md も (packaging/build.ps1 -Zip が zip の名前に使う)
+__version__ = "0.3.0"  # 版を上げるときは CHANGELOG.md も (packaging/build.ps1 -Zip が zip の名前に使う)
 
 import ctypes
 import json
