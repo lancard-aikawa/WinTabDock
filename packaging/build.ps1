@@ -59,6 +59,17 @@ if ($Zip) {
     foreach ($f in 'README.md', 'LICENSE', 'CHANGELOG.md') { Copy-Item (Join-Path $root $f) $stage }
     $zipPath = Join-Path $root "dist/$name.zip"
     if (Test-Path $zipPath) { Remove-Item $zipPath }
-    Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zipPath
+    # The freshly copied files are sometimes still locked (probably the virus scanner): Compress-Archive
+    # failed twice on base_library.zip and worked when run again. Wait and retry.
+    for ($try = 1; ; $try++) {
+        try {
+            Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zipPath -Force -ErrorAction Stop
+            break
+        } catch {
+            if ($try -ge 5) { throw }
+            Write-Host "zip failed ($($_.Exception.Message)); retrying ($try/5)"
+            Start-Sleep -Seconds 3
+        }
+    }
     Write-Host "zip: $zipPath"
 }
