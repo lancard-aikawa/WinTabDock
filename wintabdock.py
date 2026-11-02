@@ -17,7 +17,7 @@
 
 from __future__ import annotations
 
-__version__ = "0.4.0"  # 版を上げるときは CHANGELOG.md も (packaging/build.ps1 -Zip が zip の名前に使う)
+__version__ = "0.4.1"  # 版を上げるときは CHANGELOG.md も (packaging/build.ps1 -Zip が zip の名前に使う)
 
 import ctypes
 import json
@@ -1090,7 +1090,7 @@ class Dock:
                 web_root = remote.novnc_dir(STATE_DIR)
                 tls = remote.tls_setup(STATE_DIR / "tls", host) if self.prefs.get("remote_https") else None
                 view = remote.View(RemoteSource(self), self.remote_zoom, STATE_DIR / "press.log")
-                server = remote.Server(view, host, port, token, web_root, self.remote_log, tls)
+                server = remote.Server(view, host, port, token, web_root, self.remote_log, tls, __version__)
                 server.start()
             except OSError as e:
                 # 文字にしてから渡す (e は except を抜けると消えるので、あとで動く lambda からは読めない)
@@ -1171,7 +1171,7 @@ class Dock:
             self._remote_panel.lift()
             return
         win = tk.Toplevel(self.root)
-        win.title("スマホから使う")
+        win.title(f"スマホから使う — WinTabDock {__version__}")
         win.transient(self.root)
         win.resizable(False, False)
         self._remote_panel = win

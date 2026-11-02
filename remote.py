@@ -16,6 +16,7 @@ import base64
 import ctypes
 import hashlib
 import io
+import json
 import mimetypes
 import os
 import queue
@@ -1566,6 +1567,34 @@ TAP_JS = r"""// WinTabDock: show a ring where a press was sent to the PC, at onc
 // the PC was ready (2026-11-03)
 import RFB from './core/rfb.js';
 
+// The version of WinTabDock on the PC that served this page: shown for a few seconds on top, and under the logo
+// of noVNC's control bar (to tell whether the phone got the new version)
+const VERSION = __WINTABDOCK_VERSION__;
+const showVersion = () => {
+    const text = 'WinTabDock ' + VERSION;
+    const logo = document.querySelector('#noVNC_control_bar .noVNC_logo');
+    if (logo) {
+        const tag = document.createElement('div');
+        tag.id = 'wintabdock_version';
+        tag.textContent = VERSION;
+        tag.setAttribute('translate', 'no');
+        tag.style.cssText = 'text-align:center;font:12px sans-serif;color:#fff;opacity:.8;margin:-6px 0 6px';
+        logo.after(tag);
+    }
+    // A flat label, not a button: it lets touches through
+    const badge = document.createElement('div');
+    badge.id = 'wintabdock_version_badge';
+    badge.textContent = text;
+    badge.setAttribute('translate', 'no');
+    badge.style.cssText = 'position:fixed;top:8px;left:50%;transform:translateX(-50%);z-index:99999;' +
+        'padding:4px 10px;border-radius:4px;background:rgba(0,0,0,.7);color:#fff;font:13px sans-serif;' +
+        'pointer-events:none;transition:opacity .5s';
+    document.body.appendChild(badge);
+    setTimeout(() => { badge.style.opacity = '0'; }, 5000);
+    setTimeout(() => badge.remove(), 5600);
+};
+if (document.readyState === 'loading') addEventListener('DOMContentLoaded', showVersion); else showVersion();
+
 const orig = RFB.prototype._sendMouse;
 RFB.prototype._sendMouse = function (x, y, mask) {
     const was = this._wintabdockMask || 0;
@@ -1838,9 +1867,11 @@ class Server:
     tls を渡すと HTTPS で配る。同じポートに平文で来たら、証明書の入れ方のページと証明書だけを見せる。"""
 
     def __init__(self, view: View, host: str, port: int, token: str, web_root: Path,
-                 log: Callable[[str], None] = print, tls: tuple[ssl.SSLContext, str] | None = None):
+                 log: Callable[[str], None] = print, tls: tuple[ssl.SSLContext, str] | None = None,
+                 version: str = ""):
         self.view = view
         self.host, self.port, self.token = host, port, token
+        self.version = version  # noVNC の画面に出す WinTabDock の版 (スマホに新しい版が届いたかを見分ける)
         self.web_root = web_root
         self.tls = tls  # (SSLContext, 認証局の証明書の PEM)
         self.log = log
@@ -2032,7 +2063,8 @@ class Server:
         ok = bool(_SAFE_PATH.fullmatch(rel)) and ".." not in rel.split("/")
         file = (self.web_root / rel).resolve() if ok else None
         if rel in (KEYLOG_PATH, TAP_PATH):
-            body, status, ctype = (KEYLOG_JS if rel == KEYLOG_PATH else TAP_JS).encode("utf-8"), "200 OK", "text/javascript"
+            js = KEYLOG_JS if rel == KEYLOG_PATH else TAP_JS.replace("__WINTABDOCK_VERSION__", json.dumps(self.version))
+            body, status, ctype = js.encode("utf-8"), "200 OK", "text/javascript"
         elif file and file.is_file() and file.is_relative_to(self.web_root.resolve()):
             body, patched = patch_novnc(rel, file.read_bytes())
             status = "200 OK"
