@@ -229,6 +229,11 @@ class PressLog:
             if cur["release_ms"] is not None:
                 self._write()
 
+    def cut(self, reason: str) -> None:
+        """離す前に終わった (切れたなど)。いまの 1 回を書く (書かないと、その 1 回は記録に残らない)"""
+        with self.lock:
+            self._write(reason)
+
     def _expire(self, seq: int) -> None:
         with self.lock:
             if self.cur and self.cur["seq"] == seq:
@@ -587,6 +592,7 @@ class WindowInput:
         self.press: tuple[int, int] | None = None  # 押している間の宛先 (外側の窓, 子窓)
         self.key_child = 0
         self.holding = False
+        self.released_at = 0.0  # 最後に離した時刻 (pressing で使う)
         self.blocked = False  # 押してはいけない所を押した。離すまで何も送らない
         self.high_surrogate = 0  # 絵文字の代理対の前半 (後半が来るまで控える)
         self.send_failures: list = []  # 渡せなかったもの (メッセージ, 値, GetLastError)
@@ -611,10 +617,36 @@ class WindowInput:
                     log.pressed(*self.note, started)
                 elif self.buttons & 7 and not mask & 7:
                     log.released(started)
+                    self.released_at = time.monotonic()
             self.buttons, self.last = mask, (x, y)
             if mask & 7 and not self.holding:
                 self.holding = True
                 threading.Thread(target=self._hold, daemon=True).start()
+
+    # 離してからこれだけの間も「押している」とみなす (Tk が本物のマウスの下の窓で、押したことにした分の離すが遅れて来る)
+    PRESS_TAIL = 0.5
+
+    def pressing(self) -> bool:
+        """遠隔から押している間か。タブにしたツールを押している間、ツールと入力の状態を共有するドックの Tk は、
+        書き込んだボタンの状態と本物のマウスの位置を合わせて読むので、
+        PC の画面でマウスの下にある同じプロセスの Tk のボタン (「スマホから使う」の画面の「止める」など) が押されたことになる。
+        ドックはこの間、PC の画面に出している窓へのクリックを捨てる"""
+        return bool(self.buttons & 7) or time.monotonic() - self.released_at < self.PRESS_TAIL
+
+    def release_buttons(self) -> None:
+        """切れた時。押したままのボタンを離したことにする。離さないと、押している間の移動を送るスレッド (_hold) が
+        いつまでも回り、PC のマウスが Tk のボタンの上を通るたびにそのボタンが押された (2026-11-02、誰も押していないのに
+        待ち受けが止まって、また始まった)"""
+        with self.lock:
+            if not self.buttons & 7:
+                return
+            try:
+                self._pointer(0, *self.last)
+            except Exception:  # noqa: BLE001  宛先の窓が無くなっていても、離した扱いにはする
+                pass
+            self.view.press_log.cut("接続が切れた")
+            self.buttons, self.press, self.blocked = 0, None, False
+            self.released_at = time.monotonic()
 
     def _hold(self) -> None:
         while True:
@@ -1953,6 +1985,7 @@ class Server:
             if last:
                 self.view.requested = None
                 self.view.input.release_keys()
+                self.view.input.release_buttons()
                 self.view.source.connected(False)
 
     def _plain(self, sock: socket.socket, target: str, headers: dict) -> None:

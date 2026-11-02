@@ -545,6 +545,7 @@ class Dock:
         self._remote_how = ""  # 待ち受けるアドレスの決まり方 (画面に出す)
         self._remote_panel: tk.Toplevel | None = None
         self._remote_notice: tk.Toplevel | None = None  # つないでいる間、PC の画面に出す知らせ
+        self._remote_guard_logged = 0.0  # guard_from_remote で捨てたことを最後に書いた時刻
         self._remote_geometry: str | None = None  # 遠隔からつないでいる間 (ドックを画面の外に置く間) の、元の大きさ・位置
         self.remote_moved: dict[int, tuple[int, int]] = {}  # つないでいる間にドックの上へ移したツールの小窓 → 元の位置
         self.launch_panel: tk.Frame | None = None  # スマホの「+ 開く」「一覧」で、ドックの中に出す一覧
@@ -1128,6 +1129,8 @@ class Dock:
             self.start_remote()
 
     def stop_remote(self) -> None:
+        if self.remote_server:
+            self.remote_log("待ち受けを止めた")
         self.prefs["remote"] = False
         self.save_prefs()
         if self.remote_server:
@@ -1253,6 +1256,7 @@ class Dock:
             tk.Radiobutton(choices, text="この PC だけ  127.0.0.1  (スマホからはつながらない)", value="loopback",
                            variable=net_var, state=state, anchor=tk.W,
                            command=lambda: self.set_remote_network("loopback"), **hand).pack(fill=tk.X)
+            self.guard_from_remote(choices)
 
         def refresh() -> None:
             if not win.winfo_exists():
@@ -1324,6 +1328,7 @@ class Dock:
             win.after(1000, refresh)
 
         refresh()
+        self.guard_from_remote(win)
         win.update_idletasks()
         x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - win.winfo_width()) // 2)
         y = self.root.winfo_rooty() + 40
@@ -1528,6 +1533,39 @@ class Dock:
         self.settings_frame.pack(side=tk.RIGHT, padx=(0, 8), pady=4)
         self.menu_button.pack(side=tk.RIGHT, padx=6, pady=4)
 
+    REMOTE_GUARD = "RemoteGuard"  # PC の画面に出す窓の部品の先頭に付ける bindtag
+
+    def remote_pressing(self) -> bool:
+        server = self.remote_server
+        return bool(server and server.view.input.pressing())
+
+    def guard_from_remote(self, widget: tk.Misc) -> None:
+        """PC の画面に出す窓 (「スマホから使う」の画面・右下の「スマホで使用中」) の部品で、スマホから押している間の
+        クリックを捨てる。タブにしたツールはドックの子窓なので、ツールに書き込んだボタンの状態がドックの Tk にも見え、
+        Tk はそれと本物のマウスの位置を合わせて読み、PC のマウスの下のボタンが押されたことにする (マウスを「始める」の
+        上に置いたままスマホで Mery を押していて「止める」が押され、待ち受けが止まった)。
+        後から足した部品にも呼ぶ"""
+        self.root.bind_class(self.REMOTE_GUARD, "<ButtonPress>", self._drop_while_remote)
+        self.root.bind_class(self.REMOTE_GUARD, "<ButtonRelease>", self._drop_while_remote)
+        todo = [widget]
+        while todo:
+            w = todo.pop()
+            tags = w.bindtags()
+            if self.REMOTE_GUARD not in tags:
+                w.bindtags((self.REMOTE_GUARD, *tags))
+            todo.extend(w.winfo_children())
+
+    def _drop_while_remote(self, event: tk.Event) -> str | None:
+        if not self.remote_pressing():
+            return None
+        now = time.monotonic()
+        if now - self._remote_guard_logged > 1.0:
+            self._remote_guard_logged = now
+            w = event.widget
+            name = w.cget("text") if "text" in w.keys() else str(w)
+            self.remote_log(f"スマホで押している間に、PC の画面の「{name}」が押されたことになったので捨てた")
+        return "break"
+
     def show_remote_notice(self) -> None:
         """つないでいる間、PC の画面の右下に出す小さな窓。ドックが画面の外にいることを知らせ、PC の側から取り戻せるようにする。
         閉じられない (閉じると取り戻す手段が無くなる)。「PC で使う」は待ち受けごと止める (接続を切るだけだと、
@@ -1555,6 +1593,7 @@ class Dock:
             win.after(1000, refresh)
 
         refresh()
+        self.guard_from_remote(win)
         win.update_idletasks()
         area = wintypes.RECT()
         user32.SystemParametersInfoW(0x30, 0, ctypes.byref(area), 0)  # SPI_GETWORKAREA (主の画面の、タスクバーを除いた所)

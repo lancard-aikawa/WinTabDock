@@ -466,6 +466,7 @@ def steps(dock: td.Dock) -> None:
         check("前回の位置には、元の位置を覚える", saved == original, saved)
         check("切ると、知らせの窓も消える", notice_state(dock) is None)
         panel_steps(dock, token)
+        held_press_steps(dock)
 
         # 知らせの窓の「PC で使う」で取り戻す。待ち受けごと止める (つなぎ直してこない)
         c = Client(dock.prefs["remote_token"])
@@ -944,6 +945,81 @@ def panel_steps(dock: td.Dock, token: str) -> None:
     host = wait_host(dock, "127.0.0.1")
     check("「この PC だけ」に戻せる", host == "127.0.0.1", str(host))
     dock.call_in_tk(dock._remote_panel.destroy)
+
+
+def held_press_steps(dock: td.Dock) -> None:
+    """押したまま (スマホで指を置いたまま) の間と、押したまま切れたとき。
+    タブにしたツールの中を押している間、Tk は書き込まれたボタンの状態と本物のマウスの位置を合わせて読み、PC の画面で
+    マウスの下にあるドックの窓のボタンが押されたことにする。2026-11-02 に、マウスを「スマホから使う」の画面の「始める」の上に置いたまま
+    スマホで押して「止める」が押され、押したまま切れたので押している扱いが残り、後でマウスが通ると「始める」も押された"""
+    def connect() -> Client:
+        c = Client(dock.prefs["remote_token"])
+        c.set_size(411, 772)
+        c.full_frame()
+        time.sleep(1.0)  # 並べ終わってからタブの位置を読む (先に読んだら帯の地を押した)
+        return c
+
+    c = connect()
+    try:
+        x, y = button_pos(dock, dock.tabs[0].button_hwnd)
+        c.send(struct.pack(">BBHH", 5, 1, x, y))
+        time.sleep(0.5)
+    finally:
+        c.close()
+    time.sleep(1.0)
+    inp = dock.remote_server.view.input
+    check("押したまま切れると、離したことにする (押している間の移動を送り続けない)",
+          not inp.buttons & 7 and not inp.holding, f"ボタン {inp.buttons} 送り続け {inp.holding}")
+    path = HOME / "press.log"
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    check("押した記録: 押したまま切れた 1 回も、宛先と「接続が切れた」が書かれる",
+          bool(lines) and "ドックのタブ「" in lines[-1] and "接続が切れた" in lines[-1], lines[-1] if lines else "-")
+
+    if hidden_desktop.inside():
+        print("--  PC のマウスの下のボタンの試験は飛ばす (別のデスクトップには本物のマウスが無い。--here で流す)", flush=True)
+        return
+    # マウスは動かさず、「スマホから使う」の画面を、「止める」がマウスの下に来るように動かす
+    dock.call_in_tk(dock.show_remote_panel)
+    time.sleep(1.2)
+
+    def place() -> int:
+        p = dock._remote_panel
+        p.attributes("-topmost", True)  # 試験の窓は前面を取らないので、人の窓の後ろに出る。上に出しておく
+        toggle = next(w for w in all_widgets(p) if isinstance(w, td.tk.Button) and w.cget("text") == "止める")
+        pt = ctypes.wintypes.POINT()
+        ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+        cx, cy = toggle.winfo_rootx() + toggle.winfo_width() // 2, toggle.winfo_rooty() + toggle.winfo_height() // 2
+        p.geometry(f"+{p.winfo_x() + pt.x - cx}+{p.winfo_y() + pt.y - cy}")
+        p.update()
+        return toggle.winfo_id()
+
+    toggle = tk_get(dock, place)
+    pt = ctypes.wintypes.POINT()
+    ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+    if td.user32.WindowFromPoint(pt) != toggle:
+        check("押している間、PC のマウスの下のボタンは押されない (マウスの下に「止める」を置けないので飛ばす)", True)
+        dock.call_in_tk(dock._remote_panel.destroy)
+        return
+    log_size = (HOME / "remote.log").stat().st_size
+    c = connect()
+    try:
+        # タブにしたツールの中を押す。ツールの窓はドックの子窓なので、Windows がツールのスレッドとドックの Tk の
+        # スレッドの入力の状態を共有させ、ツールに書き込んだボタンの状態が Tk にも見える。ドックのタブを押したままでは
+        # 起きない (Tk 自身への書き込みは、Tk が見る前に戻る)。2026-11-02 に押していたのも Mery の中
+        x, y = button_pos(dock, dock.tabs[0].hwnd)
+        try:
+            c.tap(x, y, hold=1.5)  # 直す前は、1.5 秒押したままでマウスの下の「止める」が押され、接続が切れた
+        except OSError as e:
+            print(f"    押している間に切れた: {e!r}", flush=True)
+        time.sleep(1.0)
+        added = (HOME / "remote.log").read_bytes()[log_size:].decode("utf-8")
+        check("押している間、PC のマウスの下の「止める」は押されない (待ち受けたまま。捨てたことを記録に書く)",
+              dock.remote_server is not None and "が押されたことになったので捨てた" in added,
+              f"待ち受け {dock.remote_server} 記録 {added.strip()!r}")
+    finally:
+        c.close()
+        dock.call_in_tk(dock._remote_panel.destroy)
+    time.sleep(1.0)
 
 
 def notice_state(dock: td.Dock) -> dict | None:
