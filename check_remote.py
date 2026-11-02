@@ -4,7 +4,8 @@
 # ///
 """遠隔 (スマホのブラウザから使う。remote.py) を、ドックを開いて確かめる。
 
-    uv run check_remote.py
+    uv run check_remote.py          # 人の画面に出ない別のデスクトップで流す (エクスプローラーの試験は飛ばす)
+    uv run check_remote.py --here   # 人の画面で、エクスプローラーも含めて流す (試験の窓が一瞬ずつ前面を取る)
 
 試験用の窓 (experiments/vnc_testapp.py) を 2 つ取り込み (1 つは最小の幅 600)、noVNC と同じ WebSocket でつなぐ。
 - 合言葉 (token) と Origin が合わない接続は断る。トップのページ (/) は見せない
@@ -46,6 +47,7 @@ import remote  # noqa: E402
 import uia  # noqa: E402
 import vnc_probe_check as ck  # noqa: E402  (試験用の窓を起動する手順を借りる)
 import wintabdock as td  # noqa: E402
+import hidden_desktop  # noqa: E402
 import nofocus  # noqa: E402
 
 OUT =Path(__file__).resolve().parent / "experiments" / "out"
@@ -435,7 +437,15 @@ def steps(dock: td.Dock) -> None:
         maximize_steps(dock, apps)
         second_window_steps(dock, apps)
         tab_strip_steps(dock, c, apps)
-        explorer_steps(dock, c)
+        first_tab = td.rect_of(dock.tabs[0].button_hwnd)[0]
+        open_x = td.rect_of(tk_get(dock, dock.open_button.winfo_id))[0]
+        check("「+ 開く」は帯の左端 (タブより左) にある (窓が多いと、右の端で隠れた)", open_x < first_tab,
+              f"「+ 開く」x={open_x} 最初のタブ x={first_tab}")
+        if hidden_desktop.inside():
+            # 別のデスクトップでは、エクスプローラーの窓が応えず試験が止まった (上の部分のメニューは前面でないと開かない)
+            print("--  エクスプローラーの試験は飛ばす (別のデスクトップでは動かない。--here で流す)", flush=True)
+        else:
+            explorer_steps(dock, c)
 
         c.close()
         c = None
@@ -1071,10 +1081,6 @@ def explorer_steps(dock: td.Dock, c) -> None:
     """エクスプローラーの上の部分 (「…」「表示」など) とそのメニューは、本物のマウスしか受けない窓
     (Microsoft.UI.Content.*SiteBridge) なので、UI Automation で押す。メニューは小窓としてスマホの画面に出す。
     エクスプローラーはタスクバー・デスクトップと同じ explorer.exe のことがあり、それらまで小窓として拾っていた"""
-    first_tab = td.rect_of(dock.tabs[0].button_hwnd)[0]
-    open_x = td.rect_of(tk_get(dock, dock.open_button.winfo_id))[0]
-    check("「+ 開く」は帯の左端 (タブより左) にある (窓が多いと、右の端で隠れた)", open_x < first_tab,
-          f"「+ 開く」x={open_x} 最初のタブ x={first_tab}")
     folder = HOME / "explorer-test"
     folder.mkdir(exist_ok=True)
     before = set(all_windows())
@@ -1537,6 +1543,10 @@ def window_class(hwnd: int) -> str:
 
 def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8")
+    if "--here" not in sys.argv and not hidden_desktop.inside():
+        # 試験の窓が人の画面で前面を取ると、すぐ返しても、人が IME で変換している途中の文字が途切れる
+        print(f"人の画面に出ない別のデスクトップ ({hidden_desktop.NAME}) で流す (人の画面で流すなら --here)", flush=True)
+        sys.exit(hidden_desktop.rerun_inside())
     OUT.mkdir(exist_ok=True)
     try:
         socket.create_connection(("127.0.0.1", PORT), timeout=1).close()

@@ -908,6 +908,13 @@ class WindowInput:
         msg = (WM_SYSKEYDOWN if down else WM_SYSKEYUP) if alt else (WM_KEYDOWN if down else WM_KEYUP)
         _u.PostMessageW(dest, msg, vk, lp)
         self.combo_posted = True
+        if down:
+            # 相手がこのキーと、翻訳で列の後ろに足した文字 (Ctrl+X → WM_CHAR(0x18)) を処理し終えるまで待つ。待たずに続けて
+            # 置くと、Ctrl+X Ctrl+V Ctrl+V Ctrl+S が、ショートカットの表で受ける Ctrl+S だけ先に効いた (列が x v v s の後に
+            # 文字 x v v の順になる。EDIT の切り取り・貼り付けは文字で動く)。渡したメッセージ (WM_NULL) は列より先に
+            # 処理されるので、1 回渡すごとに相手は列を 1 つ以上進める。3 回で、キーとその文字を処理し終えている
+            for _ in range(3):
+                _u.SendMessageTimeoutW(dest, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, SEND_TIMEOUT_MS, None)
 
     def release_keys(self) -> None:
         """切れた時。押したままの修飾キーを離したことにする (相手のツールで Ctrl が押されたままになる)。"""
