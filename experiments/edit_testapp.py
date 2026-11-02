@@ -18,6 +18,9 @@ import os
 import sys
 from ctypes import wintypes
 
+import nofocus
+
+nofocus.start_if_asked()  # 試験から起動したら、前面になっても人の窓に返す
 u = ctypes.WinDLL("user32", use_last_error=True)
 k = ctypes.WinDLL("kernel32", use_last_error=True)
 LRESULT = ctypes.c_ssize_t

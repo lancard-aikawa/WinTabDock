@@ -12,7 +12,10 @@ import sys
 import time
 import tkinter as tk
 
+import nofocus
+
 ctypes.windll.shcore.SetProcessDpiAwareness(2)
+nofocus.start_if_asked()  # 試験から起動したら、前面になっても人の窓に返す
 
 root = tk.Tk()
 root.geometry("640x480+120+120")

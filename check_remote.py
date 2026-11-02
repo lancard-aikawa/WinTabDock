@@ -46,8 +46,9 @@ import remote  # noqa: E402
 import uia  # noqa: E402
 import vnc_probe_check as ck  # noqa: E402  (試験用の窓を起動する手順を借りる)
 import wintabdock as td  # noqa: E402
+import nofocus  # noqa: E402
 
-OUT = Path(__file__).resolve().parent / "experiments" / "out"
+OUT =Path(__file__).resolve().parent / "experiments" / "out"
 PORT = remote.DEFAULT_PORT
 results: list[tuple[str, bool, str]] = []
 
@@ -1543,6 +1544,7 @@ def main() -> None:
     except OSError:
         pass
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    nofocus.start(lock=True)  # 試験の窓が、人の使っている窓からフォーカスを奪わない (窓を開く前に。子にも頼む)
     if os.environ.get("CHECK_REMOTE_DUMP"):  # 止まったときに、どのスレッドがどこにいるかを書き出す
         import faulthandler
         faulthandler.dump_traceback_later(int(os.environ["CHECK_REMOTE_DUMP"]), exit=True)
