@@ -28,6 +28,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 import tomllib
 from ctypes import wintypes
 from dataclasses import dataclass
@@ -565,6 +566,10 @@ class Dock:
         session = self.load_session()
         self.root.geometry(session.get("geometry") or "1100x720+80+60")
         self.root.configure(bg=BAR_BG)
+        # 帯の文字。スマホとつないでいる間は、倍率を下げても帯が小さくならないように大きくする (apply_band_scale)
+        family = tkfont.nametofont("TkDefaultFont").actual("family")
+        self.band_font = tkfont.Font(family=family, size=self.BAND_FONT)
+        self.band_bold = tkfont.Font(family=family, size=self.BAND_FONT, weight="bold")
         self.bar = tk.Frame(self.root, bg=BAR_BG, height=36)
         self.bar.pack(side=tk.TOP, fill=tk.X)
         self.tabs_frame = tk.Frame(self.bar, bg=BAR_BG)
@@ -582,22 +587,23 @@ class Dock:
         # スマホとつないでいる間だけ「+ 起動」「設定」の代わりに出す、表示倍率のボタン (remote_connected で入れ替える)
         self.zoom_frame = tk.Frame(self.bar, bg=BAR_BG)
         zoom_button = {"bg": TAB_BG, "fg": TAB_FG, "relief": tk.FLAT, "activebackground": TAB_ACTIVE,
-                       "disabledforeground": "#55557a", "padx": 8, "cursor": "hand2"}
+                       "disabledforeground": "#55557a", "padx": 8, "cursor": "hand2", "font": self.band_font}
         # 「+ 起動」はメニュー (別の窓) を出すので遠隔からは使えない。代わりにドックの中に一覧を出す。
         # 選んでいるタブ (紫の塗り) と並ぶので、塗りでなく「設定」と同じ紫の枠で見分ける (塗りにしたら、タブとつながって見えた)。
         # 帯の左端に置く (右の倍率のボタンと並べていたら、窓が多いときに隠れた。ユーザーの報告、2026-10-30)
         self.open_frame = tk.Frame(self.bar, bg=BAR_EDGE, padx=1, pady=1)
-        self.open_button = tk.Button(self.open_frame, text="+ 開く", command=self.toggle_launch_panel, bd=0,
-                                     **{**zoom_button, "bg": BAR_BG})
+        self.open_button = tk.Button(self.open_frame, text="+ 開く", bd=0, **{**zoom_button, "bg": BAR_BG},
+                                     command=lambda: self.while_busy(self.open_button, self.toggle_launch_panel))
         self.open_button.pack()
         # 「一覧」: 開いているタブを絵で並べて選ぶ (Windows の Win+Tab のように)。「+ 開く」と同じ紫の枠
         self.grid_frame = tk.Frame(self.bar, bg=BAR_EDGE, padx=1, pady=1)
-        self.grid_button = tk.Button(self.grid_frame, text="一覧", command=self.toggle_grid_panel, bd=0,
-                                     **{**zoom_button, "bg": BAR_BG})
+        self.grid_button = tk.Button(self.grid_frame, text="一覧", bd=0, **{**zoom_button, "bg": BAR_BG},
+                                     command=lambda: self.while_busy(self.grid_button, self.toggle_grid_panel))
         self.grid_button.pack()
         self.zoom_out_button = tk.Button(self.zoom_frame, text="− 縮小", command=lambda: self.change_zoom(-1), **zoom_button)
         self.zoom_out_button.pack(side=tk.LEFT, padx=(8, 0), pady=4)
-        self.zoom_label = tk.Label(self.zoom_frame, bg=BAR_BG, fg=TAB_FG_DIM, width=5)  # 今の倍率 (押せない表示)
+        self.zoom_label = tk.Label(self.zoom_frame, bg=BAR_BG, fg=TAB_FG_DIM, width=5,
+                                   font=self.band_font)  # 今の倍率 (押せない表示)
         self.zoom_label.pack(side=tk.LEFT)
         self.zoom_in_button = tk.Button(self.zoom_frame, text="+ 拡大", command=lambda: self.change_zoom(1), **zoom_button)
         self.zoom_in_button.pack(side=tk.LEFT, padx=(0, 8), pady=4)
@@ -819,8 +825,8 @@ class Dock:
         user32.SetWindowLongPtrW(hwnd, GWL_STYLE, style & ~(WS_CAPTION | WS_THICKFRAME))
         user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (exstyle | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW)
         user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED)
-        tab.button = tk.Button(self.tabs_frame, text=name, relief=tk.FLAT, padx=12,
-                               command=lambda t=tab: self.select(t))
+        tab.button = tk.Button(self.tabs_frame, text=name, relief=tk.FLAT, padx=round(12 * self.band_scale),
+                               font=self.band_font, command=lambda t=tab: self.select(t))
         tab.button.bind("<Button-2>", lambda e, t=tab: self.close_tab(t))  # 中クリックでツールを閉じる
         tab.button.bind("<Button-3>", lambda e, t=tab: self.tab_menu(e, t))
         tab.button.pack(side=tk.LEFT, padx=(4, 0), pady=4)
@@ -855,7 +861,7 @@ class Dock:
         for t in self.tabs:
             on = t is tab
             t.button.configure(bg=TAB_ACTIVE if on else TAB_BG, fg=TAB_FG if on else TAB_FG_DIM,
-                               font=("", 9, "bold" if on else "normal"))
+                               font=self.band_bold if on else self.band_font)
             if not on:
                 if t is self.active:
                     self.remember_thumb(t)  # 隠すと真っ黒にしか写らないので、隠す前に撮っておく
@@ -1348,6 +1354,7 @@ class Dock:
             self.menu_button.pack_forget()
             self.settings_frame.pack_forget()
             self.show_zoom()
+            self.apply_band_scale()
             # タブより先に場所を取る (タブが多いと、後から並べた帯の右端のボタンが切れて押せなかった)
             self.zoom_frame.pack(side=tk.RIGHT, before=self.tabs_frame)
             self.open_frame.pack(side=tk.LEFT, padx=(8, 4), pady=4, before=self.tabs_frame)
@@ -1371,6 +1378,7 @@ class Dock:
             for t in self.tabs:
                 t.thumb = None  # スマホのためだけに覚えていた絵。PC では使わない
             self.pack_bar_buttons()
+            self.apply_band_scale()  # PC の大きさに戻す
             self.root.maxsize(*self._remote_maxsize)
             self.root.geometry(geometry)
             self.root.update_idletasks()
@@ -1383,6 +1391,33 @@ class Dock:
             self.remote_log("切れたので、ドックを元の場所に戻した")
 
     ZOOMS = (0.5, 0.67, 0.75, 0.9, 1.0, 1.25, 1.5)  # スマホでの表示倍率の段
+    BAND_FONT = 9  # 帯の文字の大きさ (PC で使うとき)
+    # つないでいる間、帯と一覧は、スマホの画面の上で少なくともこの倍率のときの大きさに見せる。倍率を下げると帯も縮み、
+    # iPad の 67% では「一覧」が高さ 15 ほどになって、何度押しても指が外れた (2026-11-03)。スマホは 150% で押せていた。
+    # 幅の広い画面 (iPad) は 150% の大きさにする。狭い画面 (スマホ) は 100% より小さくしないだけにする (150% の大きさに
+    # すると、100% で使うときに帯からタブがはみ出した)
+    BAND_ZOOM = 1.0
+    BAND_ZOOM_WIDE = 1.5
+    WIDE_SCREEN = 600  # この幅以上を頼んできた画面を、幅の広い画面とみなす
+
+    @property
+    def band_scale(self) -> float:
+        """帯と一覧の文字・余白を何倍にするか。つないでいない間は 1"""
+        if not self._remote_geometry:
+            return 1.0
+        server = self.remote_server
+        requested = server.view.requested if server else None
+        target = self.BAND_ZOOM_WIDE if requested and requested[0] >= self.WIDE_SCREEN else self.BAND_ZOOM
+        return max(1.0, target / self.remote_zoom)
+
+    def apply_band_scale(self) -> None:
+        s = self.band_scale
+        self.band_font.configure(size=round(self.BAND_FONT * s))
+        self.band_bold.configure(size=round(self.BAND_FONT * s))
+        for b in (self.open_button, self.grid_button, self.zoom_out_button, self.zoom_in_button):
+            b.configure(padx=round(8 * s))
+        for t in self.tabs:
+            t.button.configure(padx=round(12 * s))
 
     @property
     def remote_zoom(self) -> float:
@@ -1395,6 +1430,7 @@ class Dock:
         self.prefs["remote_zoom"] = self.ZOOMS[i]
         self.save_prefs()
         self.show_zoom()
+        self.apply_band_scale()
         view = self.remote_server.view if self.remote_server else None
         if view:
             view.zoom = self.ZOOMS[i]
@@ -1408,6 +1444,20 @@ class Dock:
         self.zoom_label.config(text=f"{round(z * 100)}%")
         self.zoom_out_button.config(state=tk.DISABLED if z == self.ZOOMS[0] else tk.NORMAL)
         self.zoom_in_button.config(state=tk.DISABLED if z == self.ZOOMS[-1] else tk.NORMAL)
+
+    BUSY_HOLD_MS = 400  # 出し終えてから押せるように戻すまで
+
+    def while_busy(self, button: tk.Button, action) -> None:
+        """押したらすぐ紫で塗って押せなくし、action (一覧を出す・消す) を終えて少し待ってから戻す。PC が受け取ったことが
+        スマホに届く画面で分かる。反応が無いと思って続けて押すと、2 回目で一覧が閉じていた (2026-11-03、iPad)。
+        出している間に押された分は、押せない間に処理されて捨てられる"""
+        button.configure(state=tk.DISABLED, bg=TAB_ACTIVE, disabledforeground=TAB_FG)
+        button.update_idletasks()
+        try:
+            action()
+        finally:
+            self.root.after(self.BUSY_HOLD_MS, lambda: button.winfo_exists() and button.configure(
+                state=tk.NORMAL, bg=BAR_BG, disabledforeground="#55557a"))
 
     def toggle_launch_panel(self) -> None:
         if self.launch_panel and self.panel_kind == "open":
@@ -1463,7 +1513,7 @@ class Dock:
             b = tk.Button(grid, image=img, text=f"{t.name} (表示中)" if on else t.name, compound=tk.TOP,
                           bg=TAB_ACTIVE if on else TAB_BG, activebackground="#6d28d9" if on else TAB_ACTIVE,
                           fg=TAB_FG, activeforeground=TAB_FG, relief=tk.FLAT, bd=0, padx=4, pady=4,
-                          cursor="hand2", font=("", 10), wraplength=max(40, tw),
+                          cursor="hand2", font=("", round(10 * self.band_scale)), wraplength=max(40, tw),
                           command=lambda t=t: self.root.after(0, lambda: self.select(t)))
             b.grid(row=i // cols, column=i % cols, padx=5, pady=5)
             buttons.append(b)
@@ -1471,7 +1521,8 @@ class Dock:
             tk.Label(panel, text="開いているタブがありません (「+ 開く」から起動します)", bg="#0d0d1a",
                      fg=TAB_FG_DIM).pack(side=tk.TOP, pady=12)
         back = tk.Button(panel, text="戻る", bg=TAB_BG, activebackground=TAB_ACTIVE, fg=TAB_FG, activeforeground=TAB_FG,
-                         relief=tk.FLAT, font=("", 11), padx=24, pady=6, cursor="hand2",
+                         relief=tk.FLAT, font=("", round(11 * self.band_scale)), padx=round(24 * self.band_scale),
+                         pady=round(6 * self.band_scale), cursor="hand2",
                          command=lambda: self.root.after(0, self.close_launch_panel))
         back.pack(side=tk.TOP, pady=(8, 0))
         buttons.append(back)
@@ -1481,8 +1532,9 @@ class Dock:
     def open_launch_panel(self) -> None:
         """スマホの「+ 開く」: ツールの起動・切り替えと、選んでいるツールを閉じるボタンを、ドックの中に並べる。"""
         panel = self.new_panel("open")
-        button = {"relief": tk.FLAT, "fg": TAB_FG, "font": ("", 11), "anchor": tk.W, "padx": 12, "pady": 8,
-                  "cursor": "hand2"}
+        s = self.band_scale
+        button = {"relief": tk.FLAT, "fg": TAB_FG, "font": ("", round(11 * s)), "anchor": tk.W, "padx": round(12 * s),
+                  "pady": round(8 * s), "cursor": "hand2"}
         buttons = []
 
         def add(text: str, action, bg: str = TAB_BG, active_bg: str = TAB_ACTIVE, top: int = 0) -> None:
@@ -1495,7 +1547,8 @@ class Dock:
             buttons.append(b)
 
         def heading(text: str, top: int = 0) -> None:  # 押せない見出し (枠も塗りも無い小さな文字)
-            tk.Label(panel, text=text, bg="#0d0d1a", fg=TAB_FG_DIM, anchor=tk.W).pack(fill=tk.X, pady=(top, 6))
+            tk.Label(panel, text=text, bg="#0d0d1a", fg=TAB_FG_DIM, anchor=tk.W,
+                     font=("", round(9 * s))).pack(fill=tk.X, pady=(top, 6))
 
         if self.tabs:
             # スマホの幅では帯にタブが並びきらず、右のタブが切れる。ここからも切り替えられるようにする
@@ -1603,6 +1656,7 @@ class Dock:
         """遠隔の画面の大きさに、ドックの内側を合わせる (ツールは place_active でついてくる)。"""
         if self.root.state() == "iconic":
             self.root.deiconify()
+        self.apply_band_scale()  # 帯の大きさは、頼まれた画面の幅と倍率で決まる
         self.root.geometry(f"{max(200, w)}x{max(120, h)}")
         # 窓の大きさが変わった知らせ (Configure) を処理してから並べる。update_idletasks だけでは中身がまだ古い大きさで、
         # ツールを前の幅のまま置き、遠隔の側が「ツールが収まらない」と取り違えてドックを縦に伸ばした

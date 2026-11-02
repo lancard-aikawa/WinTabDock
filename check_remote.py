@@ -815,6 +815,19 @@ def grid_steps(dock: td.Dock, c: Client) -> None:
     check("「一覧」と「+ 開く」は押すと入れ替わり、開いているほうをもう一度押すと閉じる",
           (kind_open, kind_grid) == ("open", "grid") and dock.launch_panel is None and shown() == other.hwnd,
           f"{kind_open} → {kind_grid} → {dock.panel_kind or '閉じた'} 写しているツール {shown()}")
+    # 反応が無いと思って続けて押しても閉じない (押したら塗って押せなくし、出し終えて少し待ってから戻す)
+    x, y = button_pos(dock, grid_button)
+    c.tap(x, y)
+    time.sleep(0.15)
+    busy = tk_get(dock, lambda: (dock.grid_button.cget("state"), dock.grid_button.cget("bg")))
+    c.tap(x, y)
+    time.sleep(1.0)
+    check("「一覧」を続けて 2 回押しても一覧は開いたまま (1 回目で紫に塗って押せなくする)",
+          dock.panel_kind == "grid" and busy == (td.tk.DISABLED, td.TAB_ACTIVE),
+          f"{dock.panel_kind or '閉じた'} 押した直後 {busy}")
+    restored = tk_get(dock, lambda: (dock.grid_button.cget("state"), dock.grid_button.cget("bg")))
+    check("出し終えて少したつと、「一覧」は押せる見た目に戻る", restored == (td.tk.NORMAL, td.BAR_BG), str(restored))
+    tap(grid_button)
     check("絵の並べ方: 縦長の場所に 4 つなら 2 列、1 つなら 1 列 (絵がいちばん大きくなる列の数)",
           td.thumb_grid(4, 400, 700, 1.5)[0] == 2 and td.thumb_grid(1, 400, 700, 1.5)[0] == 1,
           f"{td.thumb_grid(4, 400, 700, 1.5)} {td.thumb_grid(1, 400, 700, 1.5)}")
