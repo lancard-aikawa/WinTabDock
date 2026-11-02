@@ -428,8 +428,19 @@ class RemoteSource:
             return True
         # ドックで押せるのはタブと帯のボタン (「+ 開く」と表示倍率) と、「+ 開く」の一覧のボタン (左ボタン) だけ。
         # 「+ 起動」「設定」やタブの右クリックはメニューを出し、メニューは別の窓なので遠隔からは見えず、開いている間ドックが止まる
-        allowed = {t.button_hwnd for t in self.dock.tabs} | self.dock.zoom_hwnds | self.dock.launch_hwnds
+        allowed = {t.button_hwnd for t in self.dock.tabs} | self.dock.zoom_hwnds.keys() | self.dock.launch_hwnds.keys()
         return mask & 7 == 1 and child in allowed
+
+    def name_of(self, top: int, child: int) -> str:
+        """押した記録 (press.log) に書く宛先の名前。"""
+        if top == self.dock.dock_hwnd:
+            tab = next((t for t in self.dock.tabs if t.button_hwnd == child), None)
+            if tab:
+                return f"ドックのタブ「{tab.name}」"
+            text = self.dock.zoom_hwnds.get(child) or self.dock.launch_hwnds.get(child)
+            return f"ドックのボタン「{text}」" if text else "ドック"
+        tab = next((t for t in self.dock.tabs if t.hwnd == top), None)
+        return tab.name if tab else "ツールの小窓"
 
     def connected(self, on: bool) -> None:
         self.dock.call_in_tk(lambda: self.dock.remote_connected(on), wait=False)
@@ -538,7 +549,7 @@ class Dock:
         self.remote_moved: dict[int, tuple[int, int]] = {}  # つないでいる間にドックの上へ移したツールの小窓 → 元の位置
         self.launch_panel: tk.Frame | None = None  # スマホの「+ 開く」「一覧」で、ドックの中に出す一覧
         self.panel_kind = ""  # その一覧がどちらか ("open" / "grid")
-        self.launch_hwnds: set[int] = set()  # その一覧のボタン (遠隔から押してよい)
+        self.launch_hwnds: dict[int, str] = {}  # その一覧のボタンの窓 → 文字 (遠隔から押してよい)
         self._tk_calls: queue.SimpleQueue = queue.SimpleQueue()  # 別のスレッドから Tk で動かしてほしいこと
         self.dock_hwnd = 0
         self._closing = False
@@ -589,8 +600,8 @@ class Dock:
         self.zoom_label.pack(side=tk.LEFT)
         self.zoom_in_button = tk.Button(self.zoom_frame, text="+ 拡大", command=lambda: self.change_zoom(1), **zoom_button)
         self.zoom_in_button.pack(side=tk.LEFT, padx=(0, 8), pady=4)
-        self.zoom_hwnds = {self.open_button.winfo_id(), self.grid_button.winfo_id(), self.zoom_out_button.winfo_id(),
-                           self.zoom_in_button.winfo_id()}
+        self.zoom_hwnds = {b.winfo_id(): b.cget("text") for b in (self.open_button, self.grid_button,
+                                                                   self.zoom_out_button, self.zoom_in_button)}
         self.show_zoom()
         # タブの帯と、取り込んだツールの窓の境目。ツールの上端にも帯と似た見た目 (タブや「設定」) があると、
         # どこまでがドックか分かりにくかった
@@ -1077,7 +1088,7 @@ class Dock:
             try:
                 web_root = remote.novnc_dir(STATE_DIR)
                 tls = remote.tls_setup(STATE_DIR / "tls", host) if self.prefs.get("remote_https") else None
-                view = remote.View(RemoteSource(self), self.remote_zoom)
+                view = remote.View(RemoteSource(self), self.remote_zoom, STATE_DIR / "press.log")
                 server = remote.Server(view, host, port, token, web_root, self.remote_log, tls)
                 server.start()
             except OSError as e:
@@ -1460,7 +1471,7 @@ class Dock:
         back.pack(side=tk.TOP, pady=(8, 0))
         buttons.append(back)
         panel.photos = photos  # Tk の画像は Python の側で持っていないと消える
-        self.launch_hwnds = {b.winfo_id() for b in buttons}
+        self.launch_hwnds = {b.winfo_id(): b.cget("text") for b in buttons}
 
     def open_launch_panel(self) -> None:
         """スマホの「+ 開く」: ツールの起動・切り替えと、選んでいるツールを閉じるボタンを、ドックの中に並べる。"""
@@ -1500,7 +1511,7 @@ class Dock:
         if tab:
             # 閉じるのは取り返しがつかないので、一番下にほかと離して置き、色も変える
             add(f"「{tab.name}」を閉じる", lambda: self.close_tab(tab), bg="#4a1d2e", active_bg="#7f1d1d", top=24)
-        self.launch_hwnds = {b.winfo_id() for b in buttons}
+        self.launch_hwnds = {b.winfo_id(): b.cget("text") for b in buttons}
 
     def close_launch_panel(self, show: bool = True) -> None:
         """「+ 開く」「一覧」の一覧を消す。show なら隠していたツールを出し直す (ツールを選び直すときは、選ぶ側が出す)"""
@@ -1508,7 +1519,7 @@ class Dock:
             return
         self.launch_panel.destroy()
         self.launch_panel, self.panel_kind = None, ""
-        self.launch_hwnds = set()
+        self.launch_hwnds = {}
         if show:
             self.place_active(show=True)
 

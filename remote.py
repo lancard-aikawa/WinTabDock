@@ -171,6 +171,94 @@ def input_log(msg: str) -> None:
             f.write(f"{time.monotonic():.3f} remote {msg}\n")
 
 
+class PressLog:
+    """遠隔から押したことを、1 回 1 行で書く (押したのに反応しない・遅い、を後から切り分けるため)。
+
+    行には、押した時刻・VNC の画面の座標・宛先・どうしたか・押す/離すの処理にかかった時間と、
+    押してから画面が変わって送るまでの時間を書く。行が無ければ、押した知らせが PC に届いていない。
+    画面の変化は押した所と関係ないもの (文字のカーソルの点滅など) も数えるので、変わった行の範囲と、
+    押した高さを含むかも書く。path が None なら何もしない"""
+
+    WAIT = 2.0  # 離してからこれだけ待って画面が変わらなければ「変わらなかった」
+    MAX_BYTES = 512 * 1024  # 超えたら .1 に回して書き直す (前の 1 つだけ残す)
+
+    def __init__(self, path: Path | None):
+        self.path = path
+        self.lock = threading.Lock()
+        self.cur: dict | None = None
+        self.seq = 0
+
+    def begin(self, x: int, y: int) -> None:
+        if not self.path:
+            return
+        with self.lock:
+            self._write("次を押した")
+            self.seq += 1
+            now = time.time()
+            self.cur = {"seq": self.seq, "at": time.monotonic(), "x": x, "y": y, "where": "", "what": "",
+                        "press_ms": None, "release_ms": None, "changed": None,
+                        "clock": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)) + f".{int(now * 1000) % 1000:03d}"}
+
+    def pressed(self, where: str, what: str, started: float) -> None:
+        with self.lock:
+            if self.cur and self.cur["press_ms"] is None:
+                self.cur.update(where=where, what=what, press_ms=(time.monotonic() - started) * 1000)
+
+    def released(self, started: float) -> None:
+        with self.lock:
+            cur = self.cur
+            if not cur or cur["release_ms"] is not None:
+                return
+            cur["release_ms"] = (time.monotonic() - started) * 1000
+            if cur["changed"]:
+                self._write()
+                return
+        t = threading.Timer(self.WAIT, self._expire, (cur["seq"],))
+        t.daemon = True
+        t.start()
+
+    def frame_sent(self, y0: int, y1: int) -> None:
+        """変わった行 (y0 から y1 の手前まで) を送った。押してから最初の 1 回だけ数える"""
+        if not self.cur:
+            return
+        with self.lock:
+            cur = self.cur
+            if not cur or cur["changed"]:
+                return
+            cur["changed"] = ((time.monotonic() - cur["at"]) * 1000, y0, y1)
+            if cur["release_ms"] is not None:
+                self._write()
+
+    def _expire(self, seq: int) -> None:
+        with self.lock:
+            if self.cur and self.cur["seq"] == seq:
+                self._write()
+
+    def _write(self, cut: str = "") -> None:
+        """いまの 1 回を書いて終える (錠の中で呼ぶ)。cut は、待ち終える前に終えた理由"""
+        cur, self.cur = self.cur, None
+        if not cur or not self.path:
+            return
+        ms = lambda v: "-" if v is None else f"{v:.0f}ms"  # noqa: E731
+        line = f"{cur['clock']} ({cur['x']},{cur['y']}) {cur['where'] or '?'}: {cur['what'] or '?'}" \
+               f" (押す {ms(cur['press_ms'])}・離す {ms(cur['release_ms'])})"
+        if cur["changed"]:
+            after, y0, y1 = cur["changed"]
+            inside = "押した高さを含む" if y0 <= cur["y"] < y1 else "押した高さの外"
+            line += f" → 画面が変わるまで {after:.0f}ms (行 {y0}-{y1}、{inside})"
+        elif cut:
+            line += f" → 画面は変わらないまま{cut}"
+        else:
+            line += f" → 画面は変わらなかった ({self.WAIT:.0f} 秒待った)"
+        try:
+            if self.path.exists() and self.path.stat().st_size > self.MAX_BYTES:
+                self.path.replace(self.path.with_name(self.path.name + ".1"))
+            with open(self.path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except OSError:
+            pass
+
+
 def lparam_xy(x: int, y: int) -> int:
     return (y & 0xFFFF) << 16 | (x & 0xFFFF)
 
@@ -425,13 +513,14 @@ class View:
     ツールが最小の幅などで収まらなければ、さらに縮めて収め、縮めた分だけドックを縦に伸ばす
     (PortWho は幅 680、LPortMan は 760 より狭くならない)。"""
 
-    def __init__(self, source: Source, zoom: float = 1.0):
+    def __init__(self, source: Source, zoom: float = 1.0, press_log: Path | None = None):
         self.source = source
         self.requested: tuple[int, int] | None = None
         self.zoom = zoom
         self.scale = 1.0
         self.lock = threading.Lock()
         self.menus = Menus()
+        self.press_log = PressLog(press_log)
         self.input = WindowInput(self)
 
     def layers(self) -> list[Layer]:
@@ -505,10 +594,23 @@ class WindowInput:
         self.mods: set[int] = set()  # 押している修飾キーの keysym (Shift_L・Control_L など)
         self.hold = ModifierHold()
         self.combo_posted = False  # 修飾キーを押している間に、キーを列に置いた
+        self.note = ("", "")  # 押した記録 (PressLog) に書く、押した宛先とどうしたか
 
     def pointer(self, mask: int, x: int, y: int) -> None:
+        started = time.monotonic()
+        log = self.view.press_log
         with self.lock:
-            self._pointer(mask, x, y)
+            first = mask & 7 and not self.buttons & 7
+            if first:
+                log.begin(x, y)
+                self.note = ("", "送らなかった")
+            try:
+                self._pointer(mask, x, y)
+            finally:
+                if first:
+                    log.pressed(*self.note, started)
+                elif self.buttons & 7 and not mask & 7:
+                    log.released(started)
             self.buttons, self.last = mask, (x, y)
             if mask & 7 and not self.holding:
                 self.holding = True
@@ -541,12 +643,16 @@ class WindowInput:
         else:
             hit = self.view.hit(x, y)
             if not hit:
+                self.note = ("(窓の無い所)", "送らなかった")
                 return
             top, lx, ly = hit
             child, cx, cy = child_at(top, lx, ly)
         pressing = mask & ~self.buttons & 7
+        if pressing:
+            self.note = (self._where(top, child), "送った")
         if pressing and not self.view.source.click_allowed(top, child, mask):
             self.blocked = True
+            self.note = (self.note[0], "遠隔からは押せない所なので送らなかった")
         if INPUT_LOG and (pressing or self.buttons & ~mask & 7):
             input_log(f"{'press' if pressing else 'release'} mask={mask} at {x},{y} top={top} child={child} "
                       f"local={cx},{cy} blocked={self.blocked} under={_u.WindowFromPoint(wintypes.POINT(client_origin(child)[0] + cx, client_origin(child)[1] + cy))} child_under={child}")
@@ -565,6 +671,7 @@ class WindowInput:
                 # 終わらせなければ、つかんだままでほかのタブも押せなくなった (2026-10-29)
                 _u.SendMessageTimeoutW(child, TCM_SETCURFOCUS, tab, 0, SMTO_ABORTIFHUNG, SEND_TIMEOUT_MS, None)
                 input_log(f"tab {tab} of {child}")
+                self.note = (self.note[0], f"タブの帯の {tab + 1} 番目を選んだ")
                 self.blocked = True  # 離すまで何も送らない
                 return
             if class_name(child) in uia.BRIDGE_CLASSES:
@@ -574,6 +681,7 @@ class WindowInput:
                 dx, dy = getattr(self.view.source, "moved_by", lambda h: (0, 0))(top)
                 done = uia.press_at(child, ox + cx - dx, oy + cy - dy)
                 input_log(f"uia {done} in {child}")
+                self.note = (self.note[0], f"UI Automation で押した ({done})" if done else "UI Automation で押せなかった")
                 self.blocked = True
                 return
         mk = sum(BUTTON_MSGS[b][2] for b in BUTTON_MSGS if mask & b)
@@ -620,9 +728,16 @@ class WindowInput:
                 _u.AttachThreadInput(me, tid, False)
                 if self.mods:
                     self.hold.reapply()  # 共有をやめた時に、押している Ctrl なども消えた
+        if menu_opened:
+            self.note = (self.note[0], "送った (メニューが開いた)")
         if pressing and not menu_opened:
             _u.SendMessageTimeoutW(top, WM_ACTIVATE, WA_ACTIVE, 0, SMTO_ABORTIFHUNG, SEND_TIMEOUT_MS, None)
             _u.SendMessageTimeoutW(child, WM_SETFOCUS, 0, 0, SMTO_ABORTIFHUNG, SEND_TIMEOUT_MS, None)
+
+    def _where(self, top: int, child: int) -> str:
+        """押した記録に書く宛先。ドックが名前を付けられればその名前 (タブ・ツールの名前) と、子窓の種類"""
+        name_of = getattr(self.view.source, "name_of", None)
+        return f"{name_of(top, child) if name_of else top} [{class_name(child)}]"
 
     def _send_press(self, top: int, hwnd: int, msg: int, wp: int, lp: int) -> bool:
         """押した知らせを渡して、処理し終えるのを待つ。押した時にメニューを出すツール (Mery のメニューの帯) は、
@@ -676,6 +791,7 @@ class WindowInput:
                     _u.PostMessageW(menus[0], BUTTON_MSGS[1][1], 0, lparam_xy(-30000, -30000))
         if pressing:
             self.menu_press = bool(menu)
+            self.note = ("メニュー", "項目を押した" if menu else "メニューの外なので、メニューを閉じた")
             if not menu:
                 # メニューの外を押すと閉じる。Windows と同じく、その押し込みはツールに渡さない (離すまで何も送らない)
                 self.view.menus.cancel(tool)
@@ -1271,6 +1387,8 @@ class Session:
                 self.request = None
             self.last = frame
             self._send_rows(frame, w, y0, y1)
+            if incremental:
+                self.view.press_log.frame_sent(y0, y1)
 
     def _send_size(self, fb: tuple[int, int], reply: int | None) -> None:
         w, h = fb
@@ -1328,7 +1446,9 @@ NOVNC_PATCHES = {
     ),
     # URL に keylog が付いていたら、キーと入力欄の出来事、PC へ送ったキーを画面の隅に出す (KEYLOG_JS)。
     # iPad が実際に何を出しているかを、iPad の実機が手元に無くても画面写真で見るため
-    "vnc.html": ("</head>", '<script type="module" src="wintabdock-keylog.js"></script>\n</head>'),
+    # 押した所に輪を出す (TAP_JS)。押してから PC の画面が変わって届くまで遅れるので、押せたかが分からなかった
+    "vnc.html": ("</head>", '<script type="module" src="wintabdock-keylog.js"></script>\n'
+                 '<script src="wintabdock-tap.js"></script>\n</head>'),
     # 「追加のキー」の箱 (Ctrl・Alt など 6 つ) は中身に合わせて幅が決まるのに、中のボタンには「箱の幅の 100% から
     # 余白を引いた幅まで」という上限が付いていて、幅が 0 に潰れる (noVNC 1.6.0。枠の丸が 6 つ縦に並ぶだけだった)
     "app/styles/base.css": (
@@ -1397,6 +1517,22 @@ if (new URLSearchParams(location.search).has('keylog')) {
     };
     log('keylog on');
 }
+"""
+
+
+TAP_PATH = "wintabdock-tap.js"
+TAP_JS = r"""// WinTabDock: show a ring where the finger touched the remote screen, at once (the PC's picture comes later).
+addEventListener('pointerdown', (e) => {
+    if (!(e.target instanceof HTMLCanvasElement) || !e.target.closest('#noVNC_container')) return;
+    const ring = document.createElement('div');
+    // White ring with a dark edge: visible on light and dark screens. It must not take the touch itself
+    ring.style.cssText = 'position:fixed;width:40px;height:40px;margin:-20px 0 0 -20px;border-radius:50%;' +
+        'border:3px solid #fff;box-shadow:0 0 0 2px rgba(0,0,0,.55),inset 0 0 0 2px rgba(0,0,0,.55);' +
+        'pointer-events:none;z-index:99999;left:' + e.clientX + 'px;top:' + e.clientY + 'px';
+    document.body.appendChild(ring);
+    ring.animate([{transform: 'scale(.5)', opacity: 1}, {transform: 'scale(1.3)', opacity: 0}],
+                 {duration: 500, easing: 'ease-out'}).onfinish = () => ring.remove();
+}, {capture: true, passive: true});
 """
 
 
@@ -1838,8 +1974,8 @@ class Server:
         rel = path.lstrip("/")
         ok = bool(_SAFE_PATH.fullmatch(rel)) and ".." not in rel.split("/")
         file = (self.web_root / rel).resolve() if ok else None
-        if rel == KEYLOG_PATH:
-            body, status, ctype = KEYLOG_JS.encode("utf-8"), "200 OK", "text/javascript"
+        if rel in (KEYLOG_PATH, TAP_PATH):
+            body, status, ctype = (KEYLOG_JS if rel == KEYLOG_PATH else TAP_JS).encode("utf-8"), "200 OK", "text/javascript"
         elif file and file.is_file() and file.is_relative_to(self.web_root.resolve()):
             body, patched = patch_novnc(rel, file.read_bytes())
             status = "200 OK"

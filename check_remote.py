@@ -244,6 +244,8 @@ def steps(dock: td.Dock) -> None:
               "#noVNC_modifiers .noVNC_button {\n    max-width: none;" in http_body("/app/styles/base.css"))
         check("キーの記録 (URL に keylog) のスクリプトを読み込ませて配る",
               remote.KEYLOG_PATH in http_body("/vnc.html") and http_status("/" + remote.KEYLOG_PATH) == 200)
+        check("押した所に輪を出すスクリプトを読み込ませて配る",
+              remote.TAP_PATH in http_body("/vnc.html") and "pointerdown" in http_body("/" + remote.TAP_PATH))
         bad = ["/\\\\127.0.0.1\\c$\\x", "/C:/Windows/win.ini", "/../remote.log", "/app/../../remote.log", "/%5C%5Cx"]
         check("noVNC のフォルダの外 (\\\\相手\\共有・C:・..) は配らない (ファイルに触れる前に断る)",
               all(http_status(p) == 404 for p in bad)
@@ -410,6 +412,7 @@ def steps(dock: td.Dock) -> None:
         c.tap(round((tx + 140) * s), round((ty + 110) * s))
         title = ck.wait_title(h2, "count=1")
         check("縮めた画面の上でも押せる", "count=1" in title, title)
+        press_log_steps(dock, c)
         edit_steps(dock, c, edit_app)
         clipboard_steps(dock, c, edit_app)
         menu_steps(dock, c, edit_app)
@@ -478,6 +481,53 @@ def steps(dock: td.Dock) -> None:
         ck.close_apps([(app1, h1), (app2, h2), edit_app] + apps)
         dock.call_in_tk(dock.stop_remote)
         dock.call_in_tk(dock.quit, wait=False)
+
+
+def press_log_steps(dock: td.Dock, c: Client) -> None:
+    """押した記録 (press.log): 押すたびに 1 行。宛先・どうしたか・画面が変わるまでの時間 (変わらなければそう書く)。
+    画面の変化は、つないだ側が次の画面を頼んでいる間だけ数える (noVNC はいつも頼んでいる。この試験の Client は
+    画面がほしい時だけ頼むので、ここまでの行は「変わらなかった」になる)。最後にタブを 2 回、頼んだまま押して見る"""
+    def watched_tap(hwnd: int) -> None:
+        # noVNC と同じく、届いたらすぐ次を頼む。画面が落ち着く (0.4 秒届かない) まで続け、頼んだまま押す。
+        # 頼んで 1 回読むだけにしていたら、押す前の変化 (前の切り替えの描き残り) で頼みを使い切り、押してから
+        # 次に頼むまでの 0.8 秒が「変わるまで」に入った
+        c.ws.settimeout(0.4)
+        try:
+            while True:
+                c.send(struct.pack(">BBHHHH", 3, 1, 0, 0, *c.fb.size))
+                c.read_update()
+        except websocket.WebSocketTimeoutException:
+            pass
+        # 位置は落ち着いてから読む (選んだタブは太字で幅が変わり、隣のタブがずれる。先に読んだら隣を押した)
+        c.tap(*button_pos(dock, hwnd))
+        c.ws.settimeout(3)
+        try:
+            c.read_update()
+        finally:
+            c.ws.settimeout(10)
+
+    watched_tap(dock.tabs[0].button_hwnd)
+    watched_tap(dock.tabs[1].button_hwnd)
+    time.sleep(remote.PressLog.WAIT + 0.5)  # 前に押した分が書かれるまで
+    path = HOME / "press.log"
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    print("\n".join("    " + ln for ln in lines), flush=True)
+
+    def find(*words: str) -> str | None:
+        return next((ln for ln in lines if all(w in ln for w in words)), None)
+
+    sent = find("app1 [", ": 送った (押す ")
+    check("押した記録: ツールのボタンを押すと、ツールの名前と「送った」、押す・離すにかかった時間が書かれる", bool(sent), str(sent))
+    blocked = find("ドック [", "遠隔からは押せない所なので送らなかった")
+    check("押した記録: 押せない所 (倍率の表示) は「送らなかった」と書かれる", bool(blocked), str(blocked))
+    check("押した記録: 帯のボタンはボタンの文字で書かれる", bool(find("ドックのボタン「− 縮小」", "送った")))
+    tabs = [ln for ln in lines[-2:] if "ドックのタブ「app" in ln and "画面が変わるまで" in ln and "押した高さを含む" in ln]
+    check("押した記録: 画面を頼んでいる間にタブを押すと、画面が変わるまでの時間と、変わった行が押した高さを含むことが書かれる",
+          len(tabs) == 2, " / ".join(lines[-2:]))
+    waits = [int(ln.split("画面が変わるまで ")[1].split("ms")[0]) for ln in tabs]
+    check("タブを押してから画面が変わって届くまで 0.5 秒より短い", len(waits) == 2 and max(waits) < 500, str(waits))
+    check("押した記録: 押した数だけ行がある (ホイールは数えない。ここまでに 15 回押した)", len(lines) == 15, f"{len(lines)} 行")
+    check("タブを戻すと、元のタブが選ばれている", dock.active is dock.tabs[1], dock.active.name if dock.active else "-")
 
 
 def tls_get(path: str, ca: Path | None) -> tuple[int, bytes]:
