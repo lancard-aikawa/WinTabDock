@@ -1485,9 +1485,10 @@ NOVNC_PATCHES = {
     ),
     # URL に keylog が付いていたら、キーと入力欄の出来事、PC へ送ったキーを画面の隅に出す (KEYLOG_JS)。
     # iPad が実際に何を出しているかを、iPad の実機が手元に無くても画面写真で見るため
-    # 押した所に輪を出す (TAP_JS)。押してから PC の画面が変わって届くまで遅れるので、押せたかが分からなかった
+    # PC へ押す知らせを送った所に輪を出す (TAP_JS)。押してから PC の画面が変わって届くまで遅れるので、押せたかが
+    # 分からなかった。触れた所に出すと、つながる前 (noVNC が送らずに捨てる間) にも出て、準備ができたと思わせた
     "vnc.html": ("</head>", '<script type="module" src="wintabdock-keylog.js"></script>\n'
-                 '<script src="wintabdock-tap.js"></script>\n</head>'),
+                 '<script type="module" src="wintabdock-tap.js"></script>\n</head>'),
     # 「追加のキー」の箱 (Ctrl・Alt など 6 つ) は中身に合わせて幅が決まるのに、中のボタンには「箱の幅の 100% から
     # 余白を引いた幅まで」という上限が付いていて、幅が 0 に潰れる (noVNC 1.6.0。枠の丸が 6 つ縦に並ぶだけだった)
     "app/styles/base.css": (
@@ -1560,18 +1561,34 @@ if (new URLSearchParams(location.search).has('keylog')) {
 
 
 TAP_PATH = "wintabdock-tap.js"
-TAP_JS = r"""// WinTabDock: show a ring where the finger touched the remote screen, at once (the PC's picture comes later).
-addEventListener('pointerdown', (e) => {
-    if (!(e.target instanceof HTMLCanvasElement) || !e.target.closest('#noVNC_container')) return;
+TAP_JS = r"""// WinTabDock: show a ring where a press was sent to the PC, at once (the PC's picture comes later).
+// Only presses really sent: noVNC drops them before it is connected, and a ring then made people think
+// the PC was ready (2026-11-03)
+import RFB from './core/rfb.js';
+
+const orig = RFB.prototype._sendMouse;
+RFB.prototype._sendMouse = function (x, y, mask) {
+    const was = this._wintabdockMask || 0;
+    const sent = this._rfbConnectionState === 'connected' && !this._viewOnly;
+    orig.call(this, x, y, mask);
+    if (!sent) return;
+    this._wintabdockMask = mask;
+    if (!(mask & 7) || (was & 7)) return;
+    const c = this._canvas;
+    const b = c.getBoundingClientRect();
+    if (!c.width || !c.height) return;
+    const left = b.left + this._display.absX(x) * b.width / c.width;
+    const top = b.top + this._display.absY(y) * b.height / c.height;
     const ring = document.createElement('div');
+    ring.className = 'wintabdock-ring';
     // White ring with a dark edge: visible on light and dark screens. It must not take the touch itself
     ring.style.cssText = 'position:fixed;width:40px;height:40px;margin:-20px 0 0 -20px;border-radius:50%;' +
         'border:3px solid #fff;box-shadow:0 0 0 2px rgba(0,0,0,.55),inset 0 0 0 2px rgba(0,0,0,.55);' +
-        'pointer-events:none;z-index:99999;left:' + e.clientX + 'px;top:' + e.clientY + 'px';
+        'pointer-events:none;z-index:99999;left:' + left + 'px;top:' + top + 'px';
     document.body.appendChild(ring);
     ring.animate([{transform: 'scale(.5)', opacity: 1}, {transform: 'scale(1.3)', opacity: 0}],
                  {duration: 500, easing: 'ease-out'}).onfinish = () => ring.remove();
-}, {capture: true, passive: true});
+};
 """
 
 

@@ -247,8 +247,8 @@ def steps(dock: td.Dock) -> None:
               "#noVNC_modifiers .noVNC_button {\n    max-width: none;" in http_body("/app/styles/base.css"))
         check("キーの記録 (URL に keylog) のスクリプトを読み込ませて配る",
               remote.KEYLOG_PATH in http_body("/vnc.html") and http_status("/" + remote.KEYLOG_PATH) == 200)
-        check("押した所に輪を出すスクリプトを読み込ませて配る",
-              remote.TAP_PATH in http_body("/vnc.html") and "pointerdown" in http_body("/" + remote.TAP_PATH))
+        check("押す知らせを送った所に輪を出すスクリプトを読み込ませて配る (触れた所ではない)",
+              remote.TAP_PATH in http_body("/vnc.html") and "_sendMouse" in http_body("/" + remote.TAP_PATH))
         bad = ["/\\\\127.0.0.1\\c$\\x", "/C:/Windows/win.ini", "/../remote.log", "/app/../../remote.log", "/%5C%5Cx"]
         check("noVNC のフォルダの外 (\\\\相手\\共有・C:・..) は配らない (ファイルに触れる前に断る)",
               all(http_status(p) == 404 for p in bad)
