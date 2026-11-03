@@ -510,7 +510,7 @@ def steps(dock: td.Dock) -> None:
 def press_log_steps(dock: td.Dock, c: Client) -> None:
     """押した記録 (press.log): 押すたびに 1 行。宛先・どうしたか・画面が変わるまでの時間 (変わらなければそう書く)。
     画面の変化は、つないだ側が次の画面を頼んでいる間だけ数える (noVNC はいつも頼んでいる。この試験の Client は
-    画面がほしい時だけ頼むので、ここまでの行は「変わらなかった」になる)。最後にタブを 2 回、頼んだまま押して見る"""
+    画面がほしい時だけ頼むので、ここまでの行は「変わらなかった」になる)。最後に「▾」と「戻る」を、頼んだまま押して見る"""
     def watched_tap(hwnd: int) -> None:
         # noVNC と同じく、届いたらすぐ次を頼む。画面が落ち着く (0.4 秒届かない) まで続け、頼んだまま押す。
         # 頼んで 1 回読むだけにしていたら、押す前の変化 (前の切り替えの描き残り) で頼みを使い切り、押してから
@@ -533,8 +533,9 @@ def press_log_steps(dock: td.Dock, c: Client) -> None:
     before = dock.active
     switch = tk_get(dock, dock.switch_button.winfo_id)
     watched_tap(switch)  # タブの一覧を出す
-    time.sleep(td.Dock.BUSY_HOLD_MS / 1000 + 0.3)  # 出し終えてしばらくは押せない (続けて押しても閉じないように)
-    watched_tap(switch)  # 消す
+    back = tk_get(dock, lambda: next(w.winfo_id() for w in all_widgets(dock.launch_panel)
+                                     if isinstance(w, td.tk.Button) and w.cget("text") == "戻る"))
+    watched_tap(back)  # 消す (開いている間、▾ は押せない)
     time.sleep(remote.PressLog.WAIT + 0.5)  # 前に押した分が書かれるまで
     path = HOME / "press.log"
     lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
@@ -548,7 +549,8 @@ def press_log_steps(dock: td.Dock, c: Client) -> None:
     blocked = find("ドック [", "遠隔からは押せない所なので送らなかった")
     check("押した記録: 押せない所 (倍率の表示) は「送らなかった」と書かれる", bool(blocked), str(blocked))
     check("押した記録: 帯のボタンはボタンの文字で書かれる", bool(find("ドックのボタン「− 縮小」", "送った")))
-    tabs = [ln for ln in lines[-2:] if "ドックのボタン「タブ ▾」" in ln and "画面が変わるまで" in ln and "押した高さを含む" in ln]
+    tabs = [ln for ln, name in zip(lines[-2:], ("タブ ▾", "戻る"))
+            if f"ドックのボタン「{name}」" in ln and "画面が変わるまで" in ln and "押した高さを含む" in ln]
     check("押した記録: 画面を頼んでいる間に帯のボタンを押すと、画面が変わるまでの時間と、変わった行が押した高さを含むことが"
           "書かれる", len(tabs) == 2, " / ".join(lines[-2:]))
     waits = [int(ln.split("画面が変わるまで ")[1].split("ms")[0]) for ln in tabs]
@@ -823,28 +825,30 @@ def grid_steps(dock: td.Dock, c: Client) -> None:
     tap(buttons["戻る"])
     check("「戻る」で一覧が消え、元のツールが写る", dock.launch_panel is None and shown() == other.hwnd,
           f"一覧 {dock.launch_panel} 写しているツール {shown()}")
+    def looks(b) -> tuple:
+        return tk_get(dock, lambda: (b.cget("state"), b.cget("bg")))
+
     tap(grid_button)
     tap(tk_get(dock, dock.open_button.winfo_id))
     kind_open = dock.panel_kind
     tap(grid_button)
     kind_grid = dock.panel_kind
-    tap(grid_button)
-    check("「一覧」と「+ 開く」は押すと入れ替わり、開いているほうをもう一度押すと閉じる",
-          (kind_open, kind_grid) == ("open", "grid") and dock.launch_panel is None and shown() == other.hwnd,
-          f"{kind_open} → {kind_grid} → {dock.panel_kind or '閉じた'} 写しているツール {shown()}")
-    # 反応が無いと思って続けて押しても閉じない (押したら塗って押せなくし、出し終えて少し待ってから戻す)
-    x, y = button_pos(dock, grid_button)
-    c.tap(x, y)
-    time.sleep(0.15)
-    busy = tk_get(dock, lambda: (dock.grid_button.cget("state"), dock.grid_button.cget("bg")))
-    c.tap(x, y)
-    time.sleep(1.0)
-    check("「一覧」を続けて 2 回押しても一覧は開いたまま (1 回目で紫に塗って押せなくする)",
-          dock.panel_kind == "grid" and busy == (td.tk.DISABLED, td.TAB_ACTIVE),
-          f"{dock.panel_kind or '閉じた'} 押した直後 {busy}")
-    restored = tk_get(dock, lambda: (dock.grid_button.cget("state"), dock.grid_button.cget("bg")))
-    check("出し終えて少したつと、「一覧」は押せる見た目に戻る", restored == (td.tk.NORMAL, td.BAR_BG), str(restored))
-    tap(grid_button)
+    check("「一覧」と「+ 開く」は押すと入れ替わる", (kind_open, kind_grid) == ("open", "grid"), f"{kind_open} → {kind_grid}")
+    # 開いている間、開いたボタンは紫のまま押せない。続けて押しても (押し続けても) 閉じない (2026-11-03、iPad)
+    selected, other_button = looks(dock.grid_button), looks(dock.open_button)
+    for _ in range(3):
+        c.tap(*button_pos(dock, grid_button))
+        time.sleep(0.3)
+    time.sleep(0.7)
+    check("一覧を開いている間、開いたボタンは紫のまま押せず、何度押しても閉じない (ほかのボタンは押せる)",
+          dock.panel_kind == "grid" and selected == (td.tk.DISABLED, td.TAB_ACTIVE)
+          and other_button == (td.tk.NORMAL, td.BAR_BG),
+          f"{dock.panel_kind or '閉じた'} 一覧 {selected} + 開く {other_button}")
+    buttons = panel_buttons()
+    tap(buttons["戻る"])
+    check("「戻る」で閉じると、「一覧」は押せる見た目に戻る",
+          dock.launch_panel is None and looks(dock.grid_button) == (td.tk.NORMAL, td.BAR_BG)
+          and shown() == other.hwnd, f"一覧 {dock.launch_panel} {looks(dock.grid_button)}")
     check("絵の並べ方: 縦長の場所に 4 つなら 2 列、1 つなら 1 列 (絵がいちばん大きくなる列の数)",
           td.thumb_grid(4, 400, 700, 1.5)[0] == 2 and td.thumb_grid(1, 400, 700, 1.5)[0] == 1,
           f"{td.thumb_grid(4, 400, 700, 1.5)} {td.thumb_grid(1, 400, 700, 1.5)}")

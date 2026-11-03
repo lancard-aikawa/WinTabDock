@@ -17,7 +17,7 @@
 
 from __future__ import annotations
 
-__version__ = "0.4.2"  # 版を上げるときは CHANGELOG.md も (packaging/build.ps1 -Zip が zip の名前に使う)
+__version__ = "0.4.3"  # 版を上げるときは CHANGELOG.md も (packaging/build.ps1 -Zip が zip の名前に使う)
 
 import ctypes
 import json
@@ -868,8 +868,8 @@ class Dock:
 
     def show_switch(self) -> None:
         """つないでいる間の、選んでいるタブの名前のボタン"""
-        self.switch_button.configure(text=f"▾ {self.active.name}" if self.active else "▾ タブなし",
-                                     state=tk.NORMAL if self.tabs else tk.DISABLED)
+        self.switch_button.configure(text=f"▾ {self.active.name}" if self.active else "▾ タブなし")
+        self.show_panel_buttons()
 
     def close_tab(self, tab: Tab) -> None:
         user32.PostMessageW(tab.hwnd, WM_CLOSE, 0, 0)  # 閉じたら poll が気づいてタブを消す
@@ -1473,35 +1473,41 @@ class Dock:
     BUSY_HOLD_MS = 400  # 出し終えてから押せるように戻すまで
 
     def while_busy(self, button: tk.Button, action) -> None:
-        """押したらすぐ紫で塗って押せなくし、action (一覧を出す・消す) を終えて少し待ってから戻す。PC が受け取ったことが
-        スマホに届く画面で分かる。反応が無いと思って続けて押すと、2 回目で一覧が閉じていた (2026-11-03、iPad)。
-        出している間に押された分は、押せない間に処理されて捨てられる"""
+        """押したらすぐ紫で塗って押せなくし、action (一覧を出す) を終えて少し待ってから、開いている一覧に合わせた見た目に
+        する (show_panel_buttons)。PC が受け取ったことがスマホに届く画面で分かる。出している間に押された分は、押せない間に
+        処理されて捨てられる"""
         button.configure(state=tk.DISABLED, bg=TAB_ACTIVE, disabledforeground=TAB_FG)
         button.update_idletasks()
         try:
             action()
         finally:
-            self.root.after(self.BUSY_HOLD_MS, lambda: button.winfo_exists() and button.configure(
-                state=tk.NORMAL, bg=BAR_BG, disabledforeground="#55557a"))
+            self.root.after(self.BUSY_HOLD_MS, self.show_panel_buttons)
+
+    def show_panel_buttons(self) -> None:
+        """一覧を出した帯のボタンは、閉じるまで紫のまま押せなくする (どれを開いているかも分かる)。同じボタンを押すと閉じる
+        作りでは、反応が無いと思って続けて押すと、開いては閉じた (2026-11-03、iPad)。閉じるのは「戻る」か一覧の項目。
+        ほかのボタンを押すと、その一覧に入れ替える"""
+        for b, kind in ((self.open_button, "open"), (self.grid_button, "grid"), (self.switch_button, "tabs")):
+            if not b.winfo_exists():
+                continue
+            if kind == self.panel_kind:
+                b.configure(state=tk.DISABLED, bg=TAB_ACTIVE, disabledforeground=TAB_FG)
+            else:
+                usable = b is not self.switch_button or bool(self.tabs)  # タブが無ければ、タブの一覧は出せない
+                b.configure(state=tk.NORMAL if usable else tk.DISABLED, bg=BAR_BG, disabledforeground="#55557a")
 
     def toggle_launch_panel(self) -> None:
-        if self.launch_panel and self.panel_kind == "open":
-            self.close_launch_panel()
-        else:
+        if self.panel_kind != "open":  # 開いている間は押せない。押されても何もしない
             self.close_launch_panel(show=False)  # 「一覧」を開いていたら閉じて入れ替える
             self.open_launch_panel()
 
     def toggle_tabs_panel(self) -> None:
-        if self.launch_panel and self.panel_kind == "tabs":
-            self.close_launch_panel()
-        else:
+        if self.panel_kind != "tabs":
             self.close_launch_panel(show=False)
             self.open_launch_panel(kind="tabs")
 
     def toggle_grid_panel(self) -> None:
-        if self.launch_panel and self.panel_kind == "grid":
-            self.close_launch_panel()
-        else:
+        if self.panel_kind != "grid":
             self.close_launch_panel(show=False)
             self.open_grid_panel()
 
@@ -1519,6 +1525,7 @@ class Dock:
         panel = tk.Frame(self.body, bg="#0d0d1a", padx=16, pady=12)
         panel.place(relx=0, rely=0, relwidth=1, relheight=1)
         self.launch_panel, self.panel_kind = panel, kind
+        self.show_panel_buttons()
         return panel
 
     def open_grid_panel(self) -> None:
@@ -1615,6 +1622,7 @@ class Dock:
         self.launch_panel.destroy()
         self.launch_panel, self.panel_kind = None, ""
         self.launch_hwnds = {}
+        self.show_panel_buttons()
         if show:
             self.place_active(show=True)
 
