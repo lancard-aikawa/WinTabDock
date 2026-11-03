@@ -17,7 +17,7 @@
 
 from __future__ import annotations
 
-__version__ = "0.4.1"  # 版を上げるときは CHANGELOG.md も (packaging/build.ps1 -Zip が zip の名前に使う)
+__version__ = "0.4.2"  # 版を上げるときは CHANGELOG.md も (packaging/build.ps1 -Zip が zip の名前に使う)
 
 import ctypes
 import json
@@ -600,15 +600,28 @@ class Dock:
         self.grid_button = tk.Button(self.grid_frame, text="一覧", bd=0, **{**zoom_button, "bg": BAR_BG},
                                      command=lambda: self.while_busy(self.grid_button, self.toggle_grid_panel))
         self.grid_button.pack()
-        self.zoom_out_button = tk.Button(self.zoom_frame, text="− 縮小", command=lambda: self.change_zoom(-1), **zoom_button)
+        # つないでいる間は、帯にタブを並べず、選んでいるタブの名前のボタン 1 つにする。押すとタブの一覧を出す。
+        # スマホの幅ではタブが並びきらず、倍率のボタンの下に潜って重なった (2026-11-03)。幅は残りいっぱい (width=1 で
+        # 欲しがる幅を小さくし、長い名前は切る)
+        self.switch_frame = tk.Frame(self.bar, bg=BAR_EDGE, padx=1, pady=1)
+        self.switch_button = tk.Button(self.switch_frame, text="", width=1, anchor=tk.W, bd=0,
+                                       **{**zoom_button, "bg": BAR_BG, "font": self.band_bold},
+                                       command=lambda: self.while_busy(self.switch_button, self.toggle_tabs_panel))
+        self.switch_button.pack(fill=tk.X)
+        # 倍率のボタンは記号だけにする (間に今の倍率を出すので分かる)。「− 縮小」「+ 拡大」と書いていたら、スマホの
+        # 150% で帯の幅を取り、タブの名前のボタンが入らなかった (2026-11-03)。記録には元の名前で書く (zoom_hwnds)
+        self.zoom_out_button = tk.Button(self.zoom_frame, text="−", command=lambda: self.change_zoom(-1), **zoom_button)
         self.zoom_out_button.pack(side=tk.LEFT, padx=(8, 0), pady=4)
         self.zoom_label = tk.Label(self.zoom_frame, bg=BAR_BG, fg=TAB_FG_DIM, width=5,
                                    font=self.band_font)  # 今の倍率 (押せない表示)
         self.zoom_label.pack(side=tk.LEFT)
-        self.zoom_in_button = tk.Button(self.zoom_frame, text="+ 拡大", command=lambda: self.change_zoom(1), **zoom_button)
+        self.zoom_in_button = tk.Button(self.zoom_frame, text="+", command=lambda: self.change_zoom(1), **zoom_button)
         self.zoom_in_button.pack(side=tk.LEFT, padx=(0, 8), pady=4)
-        self.zoom_hwnds = {b.winfo_id(): b.cget("text") for b in (self.open_button, self.grid_button,
+        self.zoom_hwnds = {b.winfo_id(): b.cget("text") for b in (self.open_button, self.grid_button, self.switch_button,
                                                                    self.zoom_out_button, self.zoom_in_button)}
+        self.zoom_hwnds[self.switch_button.winfo_id()] = "タブ ▾"
+        self.zoom_hwnds[self.zoom_out_button.winfo_id()] = "− 縮小"
+        self.zoom_hwnds[self.zoom_in_button.winfo_id()] = "+ 拡大"
         self.show_zoom()
         # タブの帯と、取り込んだツールの窓の境目。ツールの上端にも帯と似た見た目 (タブや「設定」) があると、
         # どこまでがドックか分かりにくかった
@@ -850,7 +863,13 @@ class Dock:
                 self.select(self.tabs[-1])
             else:
                 self.empty.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
+                self.show_switch()
         self.save_session()
+
+    def show_switch(self) -> None:
+        """つないでいる間の、選んでいるタブの名前のボタン"""
+        self.switch_button.configure(text=f"▾ {self.active.name}" if self.active else "▾ タブなし",
+                                     state=tk.NORMAL if self.tabs else tk.DISABLED)
 
     def close_tab(self, tab: Tab) -> None:
         user32.PostMessageW(tab.hwnd, WM_CLOSE, 0, 0)  # 閉じたら poll が気づいてタブを消す
@@ -867,6 +886,7 @@ class Dock:
                     self.remember_thumb(t)  # 隠すと真っ黒にしか写らないので、隠す前に撮っておく
                 user32.ShowWindow(t.hwnd, SW_HIDE)
         self.active = tab
+        self.show_switch()
         self.place_active(show=True)
         self.save_session()
         view = self.remote_server.view if self.remote_server else None
@@ -1359,6 +1379,9 @@ class Dock:
             self.zoom_frame.pack(side=tk.RIGHT, before=self.tabs_frame)
             self.open_frame.pack(side=tk.LEFT, padx=(8, 4), pady=4, before=self.tabs_frame)
             self.grid_frame.pack(side=tk.LEFT, padx=(0, 4), pady=4, before=self.tabs_frame)
+            self.show_switch()
+            self.switch_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4), pady=4, before=self.tabs_frame)
+            self.tabs_frame.pack_forget()
             self.empty.config(text="左上の「+ 開く」からツールを開きます")
             x = user32.GetSystemMetrics(76) + user32.GetSystemMetrics(78) + 100  # 仮想画面の右端の外
             self.root.geometry(f"+{x}+{user32.GetSystemMetrics(77)}")
@@ -1372,6 +1395,8 @@ class Dock:
             geometry, self._remote_geometry = self._remote_geometry, None
             self.close_launch_panel(show=False)  # 下で選んでいるツールを出し直す
             self.empty.config(text="右上の「+ 起動 / 取り込む」からツールを開きます")
+            self.tabs_frame.pack(side=tk.LEFT, fill=tk.Y, before=self.switch_frame)
+            self.switch_frame.pack_forget()
             self.zoom_frame.pack_forget()
             self.open_frame.pack_forget()
             self.grid_frame.pack_forget()
@@ -1466,6 +1491,13 @@ class Dock:
             self.close_launch_panel(show=False)  # 「一覧」を開いていたら閉じて入れ替える
             self.open_launch_panel()
 
+    def toggle_tabs_panel(self) -> None:
+        if self.launch_panel and self.panel_kind == "tabs":
+            self.close_launch_panel()
+        else:
+            self.close_launch_panel(show=False)
+            self.open_launch_panel(kind="tabs")
+
     def toggle_grid_panel(self) -> None:
         if self.launch_panel and self.panel_kind == "grid":
             self.close_launch_panel()
@@ -1529,9 +1561,10 @@ class Dock:
         panel.photos = photos  # Tk の画像は Python の側で持っていないと消える
         self.launch_hwnds = {b.winfo_id(): b.cget("text") for b in buttons}
 
-    def open_launch_panel(self) -> None:
-        """スマホの「+ 開く」: ツールの起動・切り替えと、選んでいるツールを閉じるボタンを、ドックの中に並べる。"""
-        panel = self.new_panel("open")
+    def open_launch_panel(self, kind: str = "open") -> None:
+        """スマホの「+ 開く」: ツールの起動・切り替えと、選んでいるツールを閉じるボタンを、ドックの中に並べる。
+        kind が "tabs" (帯のタブの名前のボタン) なら、開いているツールと「戻る」だけ"""
+        panel = self.new_panel(kind)
         s = self.band_scale
         button = {"relief": tk.FLAT, "fg": TAB_FG, "font": ("", round(11 * s)), "anchor": tk.W, "padx": round(12 * s),
                   "pady": round(8 * s), "cursor": "hand2"}
@@ -1557,6 +1590,10 @@ class Dock:
                 on = t is self.active  # 帯のタブと同じく、表示中は紫で塗る
                 add(f"{t.name} (表示中)" if on else t.name, lambda t=t: self.select(t), bg=TAB_ACTIVE if on else TAB_BG,
                     active_bg="#6d28d9" if on else TAB_ACTIVE)
+        if kind == "tabs":
+            add("戻る", lambda: None, top=12)
+            self.launch_hwnds = {b.winfo_id(): b.cget("text") for b in buttons}
+            return
         heading("起動する", top=12 if self.tabs else 0)
         closed = [tool for tool in self.tools if not self.tab_of_exe(tool["exe"])]
         for tool in closed:

@@ -335,6 +335,10 @@ def steps(dock: td.Dock) -> None:
         title = ck.wait_title(h1, "text=z ")
         check("Tk のツールでも Shift+Home で選べ、Shift を離すと普通に打てる", "text=z " in title, title)
 
+        band = tk_get(dock, lambda: (dock.tabs_frame.winfo_ismapped(), dock.switch_button.winfo_ismapped(),
+                                     dock.switch_button.cget("text")))
+        check("つないでいる間は、帯にタブを並べず、選んでいるタブの名前のボタン (▾) を出す (スマホの幅で重なった)",
+              band[:2] == (0, 1) and dock.active is not None and dock.active.name in band[2], str(band))
         mapped = tk_get(dock, lambda: (dock.menu_button.winfo_ismapped(), dock.settings_button.winfo_ismapped(),
                                        dock.open_button.winfo_ismapped(), dock.zoom_out_button.winfo_ismapped(),
                                        dock.zoom_in_button.winfo_ismapped()))
@@ -391,10 +395,11 @@ def steps(dock: td.Dock) -> None:
               f"倍率 {dock.remote_zoom} ドック {size}")
         wheel_steps(dock, c, h1)
 
-        tab2_x, tab2_y = button_pos(dock, dock.tabs[1].button_hwnd)
-        c.tap(tab2_x, tab2_y)
+        tap_tab(dock, c, dock.tabs[1])
         time.sleep(1.0)
-        check("タブを押すと切り替わる", dock.active is dock.tabs[1], dock.active.name if dock.active else "-")
+        check("帯のタブの名前のボタン (▾) から選ぶと切り替わり、ボタンの名前も変わる",
+              dock.active is dock.tabs[1] and dock.tabs[1].name in tk_get(dock, lambda: dock.switch_button.cget("text")),
+              dock.active.name if dock.active else "-")
         # 切り替えて縦に伸ばした直後は、ツールがまだ描き終えておらず一部が黒いことがある (次の画像で正しく届く)。
         # 3 秒以内に正しく写れば良い
         deadline = time.monotonic() + 3
@@ -440,10 +445,10 @@ def steps(dock: td.Dock) -> None:
         maximize_steps(dock, apps)
         second_window_steps(dock, apps)
         tab_strip_steps(dock, c, apps)
-        first_tab = td.rect_of(dock.tabs[0].button_hwnd)[0]
+        switch_x = td.rect_of(tk_get(dock, dock.switch_button.winfo_id))[0]
         open_x = td.rect_of(tk_get(dock, dock.open_button.winfo_id))[0]
-        check("「+ 開く」は帯の左端 (タブより左) にある (窓が多いと、右の端で隠れた)", open_x < first_tab,
-              f"「+ 開く」x={open_x} 最初のタブ x={first_tab}")
+        check("「+ 開く」は帯の左端 (タブの名前のボタンより左) にある (窓が多いと、右の端で隠れた)", open_x < switch_x,
+              f"「+ 開く」x={open_x} タブの名前のボタン x={switch_x}")
         if hidden_desktop.inside():
             # 別のデスクトップでは、エクスプローラーの窓が応えず試験が止まった (上の部分のメニューは前面でないと開かない)
             print("--  エクスプローラーの試験は飛ばす (別のデスクトップでは動かない。--here で流す)", flush=True)
@@ -455,6 +460,10 @@ def steps(dock: td.Dock) -> None:
         time.sleep(1.5)
         now = tk_get(dock, dock.root.geometry)
         check("切ると、ドックが元の大きさ・位置に戻る", now == original, f"{now} / 元 {original}")
+        band = tk_get(dock, lambda: (dock.tabs_frame.winfo_ismapped(), dock.switch_button.winfo_ismapped(),
+                                     dock.band_font.cget("size")))
+        check("切ると、帯にタブが並び直し、タブの名前のボタンは消え、文字も PC の大きさに戻る",
+              band == (1, 0, td.Dock.BAND_FONT), str(band))
         if find_dlg:
             fx = td.rect_of(find_dlg)[0]
             vl = td.user32.GetSystemMetrics(76)
@@ -521,8 +530,11 @@ def press_log_steps(dock: td.Dock, c: Client) -> None:
         finally:
             c.ws.settimeout(10)
 
-    watched_tap(dock.tabs[0].button_hwnd)
-    watched_tap(dock.tabs[1].button_hwnd)
+    before = dock.active
+    switch = tk_get(dock, dock.switch_button.winfo_id)
+    watched_tap(switch)  # タブの一覧を出す
+    time.sleep(td.Dock.BUSY_HOLD_MS / 1000 + 0.3)  # 出し終えてしばらくは押せない (続けて押しても閉じないように)
+    watched_tap(switch)  # 消す
     time.sleep(remote.PressLog.WAIT + 0.5)  # 前に押した分が書かれるまで
     path = HOME / "press.log"
     lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
@@ -536,13 +548,15 @@ def press_log_steps(dock: td.Dock, c: Client) -> None:
     blocked = find("ドック [", "遠隔からは押せない所なので送らなかった")
     check("押した記録: 押せない所 (倍率の表示) は「送らなかった」と書かれる", bool(blocked), str(blocked))
     check("押した記録: 帯のボタンはボタンの文字で書かれる", bool(find("ドックのボタン「− 縮小」", "送った")))
-    tabs = [ln for ln in lines[-2:] if "ドックのタブ「app" in ln and "画面が変わるまで" in ln and "押した高さを含む" in ln]
-    check("押した記録: 画面を頼んでいる間にタブを押すと、画面が変わるまでの時間と、変わった行が押した高さを含むことが書かれる",
-          len(tabs) == 2, " / ".join(lines[-2:]))
+    tabs = [ln for ln in lines[-2:] if "ドックのボタン「タブ ▾」" in ln and "画面が変わるまで" in ln and "押した高さを含む" in ln]
+    check("押した記録: 画面を頼んでいる間に帯のボタンを押すと、画面が変わるまでの時間と、変わった行が押した高さを含むことが"
+          "書かれる", len(tabs) == 2, " / ".join(lines[-2:]))
     waits = [int(ln.split("画面が変わるまで ")[1].split("ms")[0]) for ln in tabs]
-    check("タブを押してから画面が変わって届くまで 0.5 秒より短い", len(waits) == 2 and max(waits) < 500, str(waits))
-    check("押した記録: 押した数だけ行がある (ホイールは数えない。ここまでに 15 回押した)", len(lines) == 15, f"{len(lines)} 行")
-    check("タブを戻すと、元のタブが選ばれている", dock.active is dock.tabs[1], dock.active.name if dock.active else "-")
+    check("帯のボタンを押してから画面が変わって届くまで 0.5 秒より短い", len(waits) == 2 and max(waits) < 500, str(waits))
+    # タブは「▾」と一覧の 2 回で選ぶ
+    check("押した記録: 押した数だけ行がある (ホイールは数えない。ここまでに 16 回押した)", len(lines) == 16, f"{len(lines)} 行")
+    check("タブの一覧を出して消すと、元のタブが選ばれたまま", dock.active is before and dock.launch_panel is None,
+          dock.active.name if dock.active else "-")
 
 
 def tls_get(path: str, ca: Path | None) -> tuple[int, bytes]:
@@ -722,9 +736,9 @@ def launch_steps(dock: td.Dock, c: Client, apps: list) -> None:
               dock.launch_panel is None and dock.active is dock.tabs[1] and shown() == dock.tabs[1].hwnd,
               f"一覧 {dock.launch_panel} 写しているツール {shown()}")
         open_panel()
-        c.tap(*button_pos(dock, dock.tabs[0].button_hwnd))
+        tap_tab(dock, c, dock.tabs[0])
         time.sleep(1.0)
-        check("一覧を開いたまま帯のタブを押すと、一覧が消えてそのタブのツールが写る",
+        check("一覧を開いたまま帯のタブの名前のボタンから選ぶと、一覧が消えてそのタブのツールが写る",
               dock.launch_panel is None and dock.active is dock.tabs[0] and shown() == dock.tabs[0].hwnd,
               f"一覧 {dock.launch_panel} 写しているツール {shown()}")
         # 選んでいるツールを閉じる (つないでいる間に開いた窓はタブになって選ばれる)
@@ -737,8 +751,10 @@ def launch_steps(dock: td.Dock, c: Client, apps: list) -> None:
         buttons = open_panel()
         name = dock.active.name if dock.active else "-"
         c.tap(*button_pos(dock, buttons.get(f"「{name}」を閉じる", 0)))
+        # ドックはタブを消してから次のタブを選ぶので、次のツールが写るまで待つ (消えた直後に見て 0 だったことがある)
         for _ in range(50):
-            if not td.user32.IsWindow(doomed[1]) and all(t.hwnd != doomed[1] for t in dock.tabs):
+            if not td.user32.IsWindow(doomed[1]) and all(t.hwnd != doomed[1] for t in dock.tabs) \
+                    and shown() not in (0, doomed[1]):
                 break
             time.sleep(0.1)
         check("一覧の「「…」を閉じる」で、選んでいるツールが閉じてタブも消え、ほかのタブのツールが写る",
@@ -767,12 +783,13 @@ def grid_steps(dock: td.Dock, c: Client) -> None:
         return layers[1][0] if len(layers) > 1 else 0
 
     grid_button = tk_get(dock, dock.grid_button.winfo_id)
-    check("帯の「一覧」は「+ 開く」の右、タブより左にある",
+    check("帯の「一覧」は「+ 開く」の右、タブの名前のボタンより左にある",
           td.rect_of(tk_get(dock, dock.open_button.winfo_id))[0] < td.rect_of(grid_button)[0]
-          < td.rect_of(dock.tabs[0].button_hwnd)[0])
+          < td.rect_of(tk_get(dock, dock.switch_button.winfo_id))[0])
     # 前の試験で表に出ていたタブ (0 と 1) を選び直して、どちらも隠す前に撮られるようにする
     for t in dock.tabs[:2]:
-        tap(t.button_hwnd)
+        tap_tab(dock, c, t)
+        time.sleep(1.0)
     active = dock.active
     buttons = tap(grid_button)
     # 画面の外の Tk は、描き直すまで前の絵 (「+ 開く」の一覧のボタンなど) が少し残る。左の余白が地の色になるまで待つ
@@ -977,7 +994,8 @@ def held_press_steps(dock: td.Dock) -> None:
 
     c = connect()
     try:
-        x, y = button_pos(dock, dock.tabs[0].button_hwnd)
+        held = dock.active  # ツールの中ほど (何も無い所) を押す。帯のボタンは、切れて離した時に押されて一覧が開く
+        x, y = button_pos(dock, held.hwnd)
         c.send(struct.pack(">BBHH", 5, 1, x, y))
         time.sleep(0.5)
     finally:
@@ -989,7 +1007,7 @@ def held_press_steps(dock: td.Dock) -> None:
     path = HOME / "press.log"
     lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
     check("押した記録: 押したまま切れた 1 回も、宛先と「接続が切れた」が書かれる",
-          bool(lines) and "ドックのタブ「" in lines[-1] and "接続が切れた" in lines[-1], lines[-1] if lines else "-")
+          bool(lines) and f"{held.name} [" in lines[-1] and "接続が切れた" in lines[-1], lines[-1] if lines else "-")
 
     if hidden_desktop.inside():
         print("--  PC のマウスの下のボタンの試験は飛ばす (別のデスクトップには本物のマウスが無い。--here で流す)", flush=True)
@@ -1474,12 +1492,14 @@ def record_keys(dock: td.Dock) -> list[str]:
 
 
 def old_zoom_buttons(img, dock: td.Dock, scale: float) -> int:
-    """縮小した画面で、帯の最後のタブと「− 縮小」の間 (100% のときの倍率のボタンがあった所) の明るい画素の数。
-    描き直しが遅れると、前の絵 (「− 縮小 100% + 拡大」) がここに残る。正しく描けていれば帯の地だけで 0。
+    """縮小した画面で、帯のタブの名前のボタンの右半分から「− 縮小」まで (100% のときの倍率のボタンがあった所) の明るい画素の数。
+    描き直しが遅れると、前の絵 (「− 100% +」) がここに残る。正しく描けていれば帯の地だけで 0。
     間は今のボタンの位置から決める (決め打ちの座標では、帯に「一覧」を足したらタブがかかった)"""
     ox = remote.client_origin(dock.dock_hwnd)[0]
     right = td.rect_of(tk_get(dock, dock.zoom_out_button.winfo_id))[0] - ox
-    left = max(r[0] + r[2] for r in (td.rect_of(t.button_hwnd) for t in dock.tabs)) - ox
+    # 帯のタブの名前のボタンの右半分 (名前は左に寄せて書くので、右半分は地だけ)
+    sx, _, sw, _ = td.rect_of(tk_get(dock, dock.switch_button.winfo_id))
+    left = sx + sw // 2 - ox
     if (right - left) * scale < 8:  # タブが倍率のボタンまで並んで、間が無い
         return 0
     return sum(1 for p in img.crop((round(left * scale) + 3, 2, round(right * scale) - 3, 22)).convert("L")
@@ -1532,14 +1552,8 @@ def RemoteSource_layers(dock: td.Dock) -> list:  # noqa: N802
 
 
 def tap_tab(dock: td.Dock, c, tab: td.Tab) -> None:
-    """帯のタブを押して選ぶ。タブが多くて帯の右の倍率のボタンの下に隠れていたら、スマホでするのと同じく「一覧」から選ぶ
-    (隠れたタブの真ん中を押して「− 縮小」を押してしまい、後の試験が 90% のまま進んだ)"""
-    zoom_left = td.rect_of(tk_get(dock, dock.zoom_frame.winfo_id))[0]
-    x, _, w, _ = td.rect_of(tab.button_hwnd)
-    if x + w <= zoom_left:
-        c.tap(*button_pos(dock, tab.button_hwnd))
-        return
-    c.tap(*button_pos(dock, tk_get(dock, dock.grid_button.winfo_id)))
+    """タブを選ぶ。つないでいる間、帯にタブは並べず、選んでいるタブの名前のボタン (▾) を押して出る一覧から選ぶ"""
+    c.tap(*button_pos(dock, tk_get(dock, dock.switch_button.winfo_id)))
     time.sleep(1.0)
     cell = tk_get(dock, lambda: next(w.winfo_id() for w in all_widgets(dock.launch_panel)
                                      if isinstance(w, td.tk.Button) and w.cget("text").split(" (")[0] == tab.name))

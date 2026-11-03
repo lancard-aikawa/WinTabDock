@@ -95,6 +95,15 @@ def dock_button_pos(dock: td.Dock, button) -> tuple[int, int]:
     return round((x - ox + w // 2) * s), round((y - oy + h // 2) * s)
 
 
+def pick_tab(dock: td.Dock, tab, target) -> None:
+    """帯のタブの名前のボタン (▾) をタップし、出た一覧から target のタブをタップする (つないでいる間、帯にタブは並べない)"""
+    tab.tap(*dock_button_pos(dock, dock.switch_button))
+    time.sleep(1.5)
+    cell = tk_get(dock, lambda: next(w for w in all_widgets(dock.launch_panel)
+                                     if isinstance(w, td.tk.Button) and w.cget("text").split(" (")[0] == target.name))
+    tab.tap(*dock_button_pos(dock, cell))
+
+
 # iPad で「sandoman」と打って「サンドマン」に変換し、確定するときの出来事 (noVNC の入力欄に起こす)
 IOS_IME_JS = """(() => {
   const kbi = document.getElementById('noVNC_keyboardinput');
@@ -140,11 +149,8 @@ def canvas_dark(tab, x: int, y: int, w: int, h: int) -> int:
 def menu_steps(dock: td.Dock, tab, he: int) -> None:
     """Mery のメニューの帯と同じく、押した時にメニューを出す窓。メニューは何度開いても毎回スマホに写るか
     (Mery で「上手く表示されないことが多い」と報告があった)。「検索...」の小窓はスマホの画面の中に出るか"""
-    bx, by, bw, bh = td.rect_of(dock.tabs[2].button_hwnd)
-    ox, oy = remote.client_origin(dock.dock_hwnd)
     view = dock.remote_server.view
-    s = view.scale  # 前のツール (最小の幅) で縮めている
-    tab.tap(round((bx - ox + bw // 2) * s), round((by - oy + bh // 2) * s))
+    pick_tab(dock, tab, dock.tabs[2])
     time.sleep(2.0)
     ck.check("Tk でないツール (メニューの帯のある窓) のタブに切り替わる", dock.active is dock.tabs[2],
              dock.active.name if dock.active else "-")
@@ -361,12 +367,11 @@ def steps(dock: td.Dock) -> None:
                  opened and dock.launch_panel is None and td.RemoteSource(dock)._active() == h1,
                  f"一覧が出た {opened} 一覧 {dock.launch_panel} 写しているツール {td.RemoteSource(dock)._active()}")
 
-        # タブ (app2) を押す。ドックの帯の中の位置 (縮めていない画面)
-        bx, by, bw, bh = td.rect_of(dock.tabs[1].button_hwnd)
-        ox, oy = remote.client_origin(dock.dock_hwnd)
-        tab.tap(bx - ox + bw // 2, by - oy + bh // 2)
+        # タブ (app2) を選ぶ。帯のタブの名前のボタン (▾) から
+        pick_tab(dock, tab, dock.tabs[1])
         time.sleep(2.0)
-        ck.check("タブのタップで切り替わる", dock.active is dock.tabs[1], dock.active.name if dock.active else "-")
+        ck.check("帯のタブの名前のボタンから選んで切り替わる", dock.active is dock.tabs[1],
+                 dock.active.name if dock.active else "-")
         va.screenshot("dock-3-minwidth")
         view = dock.remote_server.view
         _, tx, ty, tw, _ = td.RemoteSource(dock).layers()[1]
