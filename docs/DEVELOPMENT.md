@@ -86,6 +86,7 @@ uv run check_close.py PortWho RepoTether         # × を押したとき: 一緒
 
 ```sh
 uv run check_remote.py           # 人の画面に出ない別のデスクトップで流す (エクスプローラーと PC のマウスの下のボタンの試験は飛ばす。116 項目)。--here を付けると人の画面で、エクスプローラーも含めて流す (120 項目)。ドックに試験用の窓を 3 つ取り込み、noVNC と同じ WebSocket でつなぐ。設定の画面と QR コード、つないでいる間の知らせの窓、表示倍率、絵文字・日本語の変換・カタカナ (Tk と、Tk でない EDIT の窓)、ツールが開くメニューと小窓、つないでいる間に開いた外のアプリの窓、Ctrl・Shift (Tk と EDIT)、クリップボードも 、「+ 開く」の一覧、タブを絵で選ぶ「一覧」、最大化する窓、同じプロセスのもう 1 つの窓、HTTPS、ツールのタブの帯、2 本指のホイール、エクスプローラーのメニューも、押した記録と押した所の輪も、押したまま切れたときと押している間の PC のマウスの下のボタンも (120 項目。人の WinTabDock が Wi-Fi で待ち受けていると 116)
+uv run --with pillow --with numpy --with websocket-client --with zxing-cpp python experiments/firefox_remote_check.py  # 人の画面で、試験用の Firefox (別のプロファイル) をタブにして写るか・押せるか (6 項目。既定の Firefox は 1 つ NG、--no-occlusion で 6/6)
 uv run check_remote_android.py   # Android の実機 (USB デバッグ) の Chrome から。メニューと小窓、iPad の日本語の入力の並び、キーの記録、noVNC の「Ctrl」とクリップボードの欄、「+ 開く」も (24 項目)
 uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi で PC のこのアドレスにつなぐ (USB は試験の操作だけ。25 項目)
 ```
@@ -488,6 +489,16 @@ uv run experiments/vnc_android_check.py                       # Android の実�
 - **noVNC 1.6.0 の「追加のキー」は幅 0 に潰れる**: 箱 (`#noVNC_modifiers`) は中身に合わせて幅が決まるのに、中のボタンに
   `max-width: calc(100% - ...)` が付いていて、枠の丸が 6 つ縦に並ぶだけになる。配る `base.css` に `max-width: none` を足す。
   JavaScript の `click()` は幅 0 でも押せるので、押す試験だけでは気づかない (ボタンの大きさも見る)
+- **Firefox (159、2026-11-03)**: 普通の撮り方 (`PrintWindow` に `PW_RENDERFULLCONTENT` を付けない) では窓の枠だけで中身が
+  真っ白。黒でないので撮り直しもせず、スマホには白い画面が出た。`MozillaWindowClass` を `COMPOSITION_CLASSES` に入れて中身ごと
+  撮る。窓へのメッセージで送る押下は、画面の外・隠した窓・枠を外した窓でも届く (SendMessage でも PostMessage でも)。
+  ただし Firefox の窓の隠れ具合の追跡 (`widget.windows.window_occlusion_tracking.enabled`、既定は true) が、画面の外の窓を
+  隠れているとみなして描き直しを止めるので、撮った絵が押す前のまま変わらない。false にすると押すたびに写る。ドックからは
+  変えられないので README で頼む (Edge の `CalculateNativeWinOcclusion` と同じ種類)。
+  確かめ方: 試験用の Firefox を別のプロファイル (`-no-remote -new-instance -profile <一時フォルダ>`、user.js で初回の案内を
+  消す) で人の画面に出し、押すと地の色が入れ替わるページを試験のドックに入れて撮る。**隠したデスクトップでは Firefox は起動の
+  画面から先を描かない**ので、人の画面で流す。試験のページは `body` の高さを `100vh` にする (見出しだけの高さだと、真ん中を
+  押しても本文の外で、クリックが起きなかった)
 - **Chromium (Edge のアプリ窓で確かめた。WebView2 の RepoTether は未確認)**: 画面の上なら、押す・打つ・大きさの変更が効いた。
   画面の外では描くのを止め、灰色が写り、ページの大きさも変わらなかった。起動時に
   `--disable-features=CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows` を付けると、画面の外でも効いた。

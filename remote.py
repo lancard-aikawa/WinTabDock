@@ -283,8 +283,10 @@ _u.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 
 
 # 中身を合成 (DirectComposition) で描く部品の窓の種類。PrintWindow の普通の撮り方では、その部分が黒く写る。
-# エクスプローラーの上部 (アドレスバー・コマンドの帯) は WinUI 3 の部品で、真っ黒だった
-COMPOSITION_CLASSES = {"Microsoft.UI.Content.DesktopChildSiteBridge", "Windows.UI.Composition.DesktopWindowContentBridge"}
+# エクスプローラーの上部 (アドレスバー・コマンドの帯) は WinUI 3 の部品で、真っ黒だった。
+# Firefox (159) は普通の撮り方では窓の枠だけで中身が真っ白に写り、黒でないので撮り直しもしなかった (2026-11-03)
+COMPOSITION_CLASSES = {"Microsoft.UI.Content.DesktopChildSiteBridge", "Windows.UI.Composition.DesktopWindowContentBridge",
+                       "MozillaWindowClass", "MozillaCompositorWindowClass"}
 
 
 def _composited(name: str) -> bool:
@@ -292,7 +294,7 @@ def _composited(name: str) -> bool:
 
 
 def uses_chromium(hwnd: int) -> bool:
-    """窓かその子窓が Chromium (Edge・Electron・WebView2) か、合成で描く部品 (WinUI・XAML) を持つか。
+    """窓かその子窓が Chromium (Edge・Electron・WebView2) か、合成で描く部品 (WinUI・XAML・Firefox) を持つか。
     窓の種類の名前が Chrome_ で始まるか、COMPOSITION_CLASSES。"""
     if hwnd not in _chromium:
         found = []
