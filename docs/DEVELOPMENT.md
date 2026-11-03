@@ -86,7 +86,7 @@ uv run check_close.py PortWho RepoTether         # × を押したとき: 一緒
 
 ```sh
 uv run check_remote.py           # 人の画面に出ない別のデスクトップで流す (エクスプローラーと PC のマウスの下のボタンの試験は飛ばす。116 項目)。--here を付けると人の画面で、エクスプローラーも含めて流す (120 項目)。ドックに試験用の窓を 3 つ取り込み、noVNC と同じ WebSocket でつなぐ。設定の画面と QR コード、つないでいる間の知らせの窓、表示倍率、絵文字・日本語の変換・カタカナ (Tk と、Tk でない EDIT の窓)、ツールが開くメニューと小窓、つないでいる間に開いた外のアプリの窓、Ctrl・Shift (Tk と EDIT)、クリップボードも 、「+ 開く」の一覧、タブを絵で選ぶ「一覧」、最大化する窓、同じプロセスのもう 1 つの窓、HTTPS、ツールのタブの帯、2 本指のホイール、エクスプローラーのメニューも、押した記録と押した所の輪も、押したまま切れたときと押している間の PC のマウスの下のボタンも (120 項目。人の WinTabDock が Wi-Fi で待ち受けていると 116)
-uv run --with pillow --with numpy --with websocket-client --with zxing-cpp python experiments/firefox_remote_check.py  # 人の画面で、試験用の Firefox (別のプロファイル) をタブにして写るか・押せるか (6 項目。既定の Firefox は 1 つ NG、--no-occlusion で 6/6)
+uv run --with pillow --with numpy --with websocket-client --with zxing-cpp python experiments/browser_remote_check.py  # 人の画面で、試験用の Firefox (別のプロファイル) をタブにして写るか・押せるか (6 項目。既定の設定では 1 つ NG、--no-occlusion で 6/6)。--browser chrome / --browser edge で Chrome・Edge (結果は Firefox と同じ)
 uv run check_remote_android.py   # Android の実機 (USB デバッグ) の Chrome から。メニューと小窓、iPad の日本語の入力の並び、キーの記録、noVNC の「Ctrl」とクリップボードの欄、「+ 開く」も (24 項目)
 uv run check_remote_android.py --lan 192.168.x.x   # スマホは家の Wi-Fi で PC のこのアドレスにつなぐ (USB は試験の操作だけ。25 項目)
 ```
@@ -503,6 +503,12 @@ uv run experiments/vnc_android_check.py                       # Android の実�
   画面の外では描くのを止め、灰色が写り、ページの大きさも変わらなかった。起動時に
   `--disable-features=CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows` を付けると、画面の外でも効いた。
   WebView2 なら環境変数 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` で渡せるはず (未確認)
+- **Chrome・Edge (2026-11-03)**: Firefox と同じ試験 (`experiments/browser_remote_check.py --browser chrome|edge`)
+  で、既定の起動では中身は写り押下も届くが、押したあとの絵が変わらない (5/6)。上の 2 つを付けて起動すると 6/6。
+  Firefox と違って設定の画面では変えられないので、README で起動のショートカットに書き足すよう頼む。
+  試験では `--user-data-dir` を分け、`--app=` で開く (タブの帯と初回の案内が出ない)。Edge は分けたプロファイルでも
+  Windows のアカウントで自動でサインインし、その知らせがページを暗く覆う (赤が 82,0,0 に写る)。色そのものでなく
+  赤寄りか緑寄りかで比べ、終わったらプロファイルのフォルダごと消す
 - `--input sendinput` (本物の入力) は書いただけで試していない。手元のマウスを動かし、画面の上の窓にしか届かない
 - 画面ロック中に撮れるか・押せるかは試していない (無人の PC をロックすると、試験の後で戻せない)
 
