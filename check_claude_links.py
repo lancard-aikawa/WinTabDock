@@ -113,9 +113,17 @@ import claude_panel  # noqa: E402
 
 
 class FakeDock:
+    hwnd = 1
     active = None
+    tabs = []
 
     def adopt_vscode_windows(self, _):
+        pass
+
+    def set_attention(self, _):
+        pass
+
+    def flash_taskbar(self):
         pass
 
 

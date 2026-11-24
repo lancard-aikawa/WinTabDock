@@ -39,6 +39,9 @@ ALL = "*"  # 隠すとき、どの窓でも隠す
 
 RECENT_SECONDS = 3 * 24 * 3600  # これより前に止まったセッションは出さない
 BUSY_SECONDS = 15  # 記録がこの秒数のうちに増えていれば「動作中」
+# 道具を呼んだまま結果がこの秒数返らなければ「許可待ちかも」(長いコマンドの実行中も入る。外れることがある)
+ASK_SECONDS = 30
+GIT_SECONDS = 30  # git の状態を取り直す間 (3 秒ごとに git を呼ばない)
 MAX_SESSIONS_PER_WINDOW = 6
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 URL_RE = re.compile(r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'*+,;=%]+")
@@ -112,12 +115,14 @@ class Session:
     cwd: str = ""
     branch: str = ""
     updated: float = 0.0  # 記録のファイルの更新時刻
-    state: str = ""  # "busy" (動作中) / "waiting" (返事待ち) / "stalled" (道具の途中で止まっている。許可待ちかも)
+    # "busy" (動作中) / "waiting" (返事待ち) / "asking" (道具の結果が返らない。許可待ちかも) / "stalled" (考え中か中断)
+    state: str = ""
     edited: dict[str, float] = field(default_factory=dict)  # 編集したリポジトリ (無ければフォルダ) → 最後に編集した時刻
     urls: list[str] = field(default_factory=list)  # 新しい順
     _offset: int = 0
     _size: int = -1
-    _last_kind: str = ""  # 最後の会話の行: "end" (返事を終えた) / "tool" (道具を呼んだ・結果を返した) / "user"
+    # 最後の会話の行: "end" (返事を終えた) / "tool_use" (道具を呼んだ) / "tool_result" (結果を返した) / "user"
+    _last_kind: str = ""
 
     def to_json(self) -> dict:
         return {"id": self.id, "title": self.title, "last_prompt": self.last_prompt, "cwd": self.cwd,
@@ -134,6 +139,7 @@ class Window:
     urls: list[tuple[str, str]] = field(default_factory=list)  # 窓の URL: (URL, 名前)。足したもの → LPortMan の台帳の順
     added: set[str] = field(default_factory=set)  # urls のうち、link add で足したもの
     hidden: set[str] = field(default_factory=set)  # 隠す URL (この窓の分と、どの窓でも隠す分)
+    git: dict[str, "GitState"] = field(default_factory=dict)  # リポジトリの根 → やり残し (窓のフォルダと、編集したもの)
 
     def session_urls(self, s: Session, n: int = 3) -> list[str]:
         """セッションの下に出す URL。隠したものと、窓の下に出ているものは出さない"""
@@ -143,7 +149,53 @@ class Window:
     def to_json(self) -> dict:
         return {"folder": self.folder, "name": self.name, "pid": self.pid,
                 "sessions": [s.to_json() | {"urls": self.session_urls(s, 8)} for s in self.sessions],
-                "urls": self.urls, "added": sorted(self.added), "hidden": sorted(self.hidden)}
+                "urls": self.urls, "added": sorted(self.added), "hidden": sorted(self.hidden),
+                "git": {k: v.__dict__ for k, v in self.git.items()}}
+
+
+# ── git のやり残し ──
+@dataclass
+class GitState:
+    dirty: int = 0  # 未コミットのファイルの数 (追跡していない新しいファイルも数える)
+    ahead: int | None = None  # 未 push のコミットの数。リモートが無ければ None
+    upstream: bool = False  # 上流のブランチがある (無ければ ahead はどのリモートにも無いコミットの数)
+
+    def label(self) -> str:
+        parts = []
+        if self.dirty:
+            parts.append(f"未コミット {self.dirty}")
+        if self.ahead:
+            parts.append(f"未push {self.ahead}")
+        return "  ".join(parts)
+
+
+def _git(root: str, *args: str) -> str | None:
+    import subprocess
+    try:
+        r = subprocess.run(["git", "-C", root, *args], capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=5, stdin=subprocess.DEVNULL,
+                           creationflags=0x08000000 if sys.platform == "win32" else 0,  # 黒い窓を出さない
+                           env=os.environ | {"GIT_OPTIONAL_LOCKS": "0"})  # 人の git と index.lock を取り合わない
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout if r.returncode == 0 else None  # 持ち主の違うリポジトリ (dubious ownership) などは出さない
+
+
+def git_state(root: str) -> GitState | None:
+    out = _git(root, "status", "--porcelain=v1", "-b")
+    if out is None:
+        return None
+    lines = out.splitlines()
+    head = lines[0] if lines and lines[0].startswith("## ") else ""
+    st = GitState(dirty=sum(1 for x in lines if x and not x.startswith("## ")))
+    if "..." in head:
+        st.upstream = True
+        m = re.search(r"\[ahead (\d+)", head)
+        st.ahead = int(m.group(1)) if m else 0
+    elif (_git(root, "remote") or "").strip():
+        n = _git(root, "rev-list", "--count", "HEAD", "--not", "--remotes")
+        st.ahead = int(n.strip()) if n and n.strip().isdigit() else None
+    return st
 
 
 # ── 足した URL・隠した URL (claude_links.json) ──
@@ -225,6 +277,8 @@ class Scanner:
         self.ports_json = ports_json
         self.links_json = links_json
         self.sessions: dict[str, Session] = {}  # ファイルのパス → Session
+        self._git: dict[str, tuple[float, GitState | None]] = {}  # リポジトリの根 (normcase) → (取った時刻, 状態)
+        self.git_wanted: set[str] = set()  # 欄に出ているリポジトリの根
 
     # ── 窓 ──
     def windows(self) -> list[Window]:
@@ -246,7 +300,9 @@ class Scanner:
         return out
 
     # ── 全体 ──
-    def scan(self, now: float | None = None) -> list[Window]:
+    def scan(self, now: float | None = None, git: bool = True) -> list[Window]:
+        """git=False なら git を呼ばず、覚えている状態だけ付ける (欄は git を別のスレッドで refresh_git する。
+        12 のリポジトリで合わせて約 9 秒かかり、同じスレッドでは、その間セッションの状態が止まる)"""
         now = now or time.time()
         wins = self.windows()
         dirs = {p.name.lower(): p for p in (self.claude_dir / "projects").iterdir() if p.is_dir()} \
@@ -272,6 +328,14 @@ class Scanner:
             w.sessions.sort(key=lambda s: -s.updated)
             del w.sessions[MAX_SESSIONS_PER_WINDOW:]
             roots = {w.folder} | {r for s in w.sessions for r in s.edited}
+            for root in {git_root(w.folder)} | {r for s in w.sessions for r in s.edited}:
+                if root:
+                    self.git_wanted.add(root)
+                    if git:
+                        self._git_state(root, now)
+                    got = self._git.get(os.path.normcase(root))
+                    if got and got[1]:
+                        w.git[root] = got[1]
             mine = _lookup(links, w.folder)
             w.hidden = hide_all | set(mine.get("hide") or [])
             w.urls = []
@@ -285,6 +349,20 @@ class Scanner:
                         and url not in w.hidden):
                     w.urls.append((url, r.get("name", "")))
         return wins
+
+    def _git_state(self, root: str, now: float) -> GitState | None:
+        key = os.path.normcase(root)
+        got = self._git.get(key)
+        if not got or now - got[0] >= GIT_SECONDS:
+            got = (now, git_state(root))
+            self._git[key] = got
+        return got[1]
+
+    def refresh_git(self, now: float | None = None) -> None:
+        """欄に出ているリポジトリの git の状態を、古くなったものだけ取り直す (別のスレッドから呼ぶ)"""
+        now = now or time.time()
+        for root in list(self.git_wanted):
+            self._git_state(root, now)
 
     def _registry(self) -> list[dict]:
         try:
@@ -314,6 +392,8 @@ class Scanner:
             s.state = "busy"
         elif s._last_kind == "end":
             s.state = "waiting"
+        elif s._last_kind == "tool_use" and now - mtime >= ASK_SECONDS:
+            s.state = "asking"
         else:
             s.state = "stalled"
 
@@ -354,11 +434,11 @@ class Scanner:
             if t == "assistant":
                 kinds = {b.get("type") for b in blocks if isinstance(b, dict)}
                 if "tool_use" in kinds:
-                    s._last_kind = "tool"
+                    s._last_kind = "tool_use"
                 elif msg.get("stop_reason") == "end_turn" or ("text" in kinds and msg.get("stop_reason") != "tool_use"):
                     s._last_kind = "end"
             else:
-                s._last_kind = "tool" if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in blocks) \
+                s._last_kind = "tool_result" if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in blocks) \
                     else "user"
 
     @staticmethod
@@ -392,7 +472,7 @@ def _pid_alive(pid: int) -> bool:
     return bool(ok) and code.value == 259  # STILL_ACTIVE
 
 
-STATE_LABEL = {"busy": "動作中", "waiting": "返事待ち", "stalled": "止まっている"}
+STATE_LABEL = {"busy": "動作中", "waiting": "返事待ち", "asking": "許可待ちかも", "stalled": "考え中か中断"}
 
 
 def ago(seconds: float) -> str:
@@ -470,7 +550,8 @@ def main() -> None:
         return
     now = time.time()
     for w in wins:
-        print(f"■ {w.name}  ({w.folder})")
+        g = w.git.get(git_root(w.folder) or "")
+        print(f"■ {w.name}  ({w.folder})" + (f"  [{g.label()}]" if g and g.label() else ""))
         for url, name in w.urls:
             print(f"    URL {url}  {name}")
         for s in w.sessions:
@@ -478,7 +559,8 @@ def main() -> None:
                   f"{'  ' + s.branch if s.branch else ''}")
             others = [r for r in s.edited if not same_path(r, w.folder)]
             for r in others:
-                print(f"      編集: {r}")
+                g = w.git.get(r)
+                print(f"      編集: {r}" + (f"  [{g.label()}]" if g and g.label() else ""))
             for u in w.session_urls(s):
                 print(f"      URL {u}")
 

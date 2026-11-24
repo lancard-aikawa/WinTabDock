@@ -56,7 +56,17 @@ uv run demo/shoot.py            # README の画面 (架空のデモアプリを�
   「前のタブ - フォルダ名 - Visual Studio Code」で、前のタブが Claude のチャットならセッションの題名になる
 - セッションは `~/.claude/projects/<フォルダの英数字以外を -に>/*.jsonl`。フォルダ名は `C--` と `c--` が混ざるので大文字小文字を無視して探す。
   記録は数 MB になるので、ファイルごとに読んだ位置を覚えて増えた分だけ読む (最初の 1 回は全部で数秒かかる。別のスレッドで回す)
-- 状態: 記録が 15 秒以内に増えた = 動作中、最後の返事が道具を呼ばずに終わった = 返事待ち、それ以外 = 道具の途中 (許可待ちを含む)
+- 状態: 記録が 15 秒以内に増えた = 動作中、最後の返事が道具を呼ばずに終わった = 返事待ち、道具を呼んだまま結果が 30 秒返らない
+  = 許可待ちかも (許可を待っている間は記録が増えないので、長いコマンドと見分けられない)、それ以外 = 考え中か中断
+- 知らせ (`ClaudePanel.update_attention`、0.5 秒ごと): 前に見た状態が返事待ち・許可待ちかも以外で、今そうなったセッションを
+  知らせる。最初の一覧 (前の状態が無い) では知らせない。見ている = ドックでその窓のタブを選んでいて、ドックかその窓が前面
+  (外した窓なら、その窓が前面)。見たら消す。ドックへは `set_attention` で窓の番号を渡し、`style_tab` が
+  選択中 > 知らせ中 (橙) > ほか の順に塗る。タスクバーは `FlashWindowEx` の FLASHW_TRAY を 3 回だけ (光り続けさせない)
+- git のやり残し (`git_state`): `git status --porcelain=v1 -b` の行数と `[ahead N]`。上流が無ければ
+  `rev-list --count HEAD --not --remotes`。`GIT_OPTIONAL_LOCKS=0` (人の git と index.lock を取り合わない)・CREATE_NO_WINDOW
+  (黒い窓を出さない)・5 秒で打ち切り。手元の 12 のリポジトリで 1 か所 0.4〜1.2 秒、合わせて約 9 秒かかったので、一覧づくりとは
+  別のスレッドで 30 秒ごとに取り、一覧づくりは覚えている値を付けるだけにする (`scan(git=False)`・`refresh_git`)。
+  持ち主の違うリポジトリ (dubious ownership) と共有フォルダの git は失敗するので札を出さない
 - 欄の一覧は 3 秒ごとに取り直すが、作り直すのは形 (窓・セッション・題名・編集先・URL) が変わったときだけ。状態・時刻・選択中の色は
   部品の文字と色を書き換えるだけにする。全部作り直していたときは、動いているセッションの「たった今」と「1分前」が行き来するたびに
   欄が消えて描き直され、ちらついた (1 分で 6 回)。セッションの並びも、新しいセッションが出たときだけ変える
@@ -90,6 +100,7 @@ uv run check_session.py PortWho RepoTether       # 前回のタブ: 起動中な
 uv run check_startup.py PortWho RepoTether       # 起動時に開く: 選び方ごとに開くもの・起動するものが変わるか
 uv run check_claude_panel.py                     # Claude の欄: VS Code の窓の自動取り込み (VS Code に似せた窓で。人の VS Code には触らない。人の画面に出ない別のデスクトップで流す。13 項目)
 uv run check_claude_links.py                     # Claude の欄: URL を足す・隠す (link のコマンドと右クリック。画面に何も出さない)
+uv run check_claude_notice.py                    # Claude の欄: 返事待ちの知らせと git のやり残し (画面に何も出さない。24 項目)
 uv run check_taskbar.py PortWho RepoTether       # ドックを閉じたあと、ツールがタスクバーに戻るか (UI Automation で見る)
 uv run check_close.py PortWho RepoTether         # × を押したとき: 一緒に閉じる / 残す / たずねる / × を無視するアプリ
 ```

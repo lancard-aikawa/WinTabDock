@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import ctypes
 import os
 import queue
 import re
@@ -32,11 +33,16 @@ WIN_BG, WIN_HOVER, WIN_ACTIVE = "#2e2e52", "#3b3b68", "#7c3aed"
 ROW_BG, ROW_HOVER = "#20203a", "#2c2c4c"
 LINK_FG, LINK_EDGE, LINK_HOVER = "#9cc3ff", "#3d5a8a", "#22304a"
 FG, FG_DIM = "#ffffff", "#9a9ab8"
+# 知らせ (動いていたセッションが、こちらを待つようになった)。窓の行とセッションの行を橙で塗る
+ATTN_BG, ATTN_HOVER, ROW_ATTN, ROW_ATTN_HOVER = "#b45309", "#c2650f", "#5c3a12", "#6e4818"
+GIT_FG = "#fdba74"  # やり残しの札 (押せない)
 STATE_STYLE = {  # 押せない札: 色の点と文字だけ (塗りも枠も付けない)
     "busy": ("●", "#4ade80", "動作中"),
     "waiting": ("●", "#facc15", "返事待ち"),
-    "stalled": ("◌", "#9a9ab8", "実行中か許可待ち"),
+    "asking": ("●", "#fb923c", "許可待ちかも"),
+    "stalled": ("◌", "#9a9ab8", "考え中か中断"),
 }
+WANTS_YOU = ("waiting", "asking")  # この状態に変わったら知らせる
 
 
 def vscode_title_matches(title: str, name: str) -> bool:
@@ -106,11 +112,15 @@ class ClaudePanel:
         self._order: dict[str, list[str]] = {}  # 窓 → セッションの並び
         self._win_buttons = {}
         self._state_labels = {}
+        self._title_buttons: dict[tuple[str, str], tk.Button] = {}
+        self._prev: dict[tuple[str, str], str] = {}  # (窓, セッション) → 前に見た状態
+        self.attention: set[tuple[str, str]] = set()  # 知らせているセッション。その窓を見たら消す
         self._results: queue.SimpleQueue = queue.SimpleQueue()
         self._stop = threading.Event()
         self._wake = threading.Event()  # 欄から URL を隠したときに、すぐ取り直させる
         self.visible = False
         threading.Thread(target=self._scan_loop, daemon=True).start()
+        threading.Thread(target=self._git_loop, daemon=True).start()
         self.frame.after(300, self._drain)
 
     # ── 表示・非表示 ──
@@ -138,12 +148,57 @@ class ClaudePanel:
     def _scan_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                wins = self.scanner.scan()
+                wins = self.scanner.scan(git=False)
                 self._results.put(("ok", wins, time.time()))
             except Exception as e:  # 読めないファイルなどで止めない
                 self._results.put(("error", repr(e), time.time()))
             self._wake.wait(SCAN_SECONDS)
             self._wake.clear()
+
+    def _git_loop(self) -> None:
+        """git の状態は別に取る (遅い。一覧づくりを止めない)。取れたら一覧を取り直させる"""
+        while not self._stop.is_set():
+            if self.scanner.git_wanted:
+                try:
+                    self.scanner.refresh_git()
+                except Exception:
+                    pass
+                self._wake.set()
+            self._stop.wait(cs.GIT_SECONDS if self.scanner.git_wanted else 1.0)
+
+    # ── 知らせ ──
+    def looking_at(self, w: cs.Window) -> bool:
+        """人がいまその窓を見ているか (ドックでそのタブを選んでいて、ドックかその窓が前面。ドックの外の窓なら、それが前面)"""
+        fg = ctypes.windll.user32.GetForegroundWindow() or 0
+        tab = self.dock.active
+        if tab and fg in (self.dock.hwnd, tab.hwnd) and vscode_title_matches(self.title_of(tab.hwnd), w.name):
+            return True
+        return bool(fg) and fg != self.dock.hwnd and vscode_title_matches(self.title_of(fg), w.name)
+
+    def update_attention(self) -> None:
+        fresh = False
+        alive = set()
+        for w in self.windows:
+            looking = self.looking_at(w)
+            for x in w.sessions:
+                key = (w.folder, x.id)
+                alive.add(key)
+                before = self._prev.get(key)
+                self._prev[key] = x.state
+                if x.state not in WANTS_YOU:
+                    self.attention.discard(key)  # また動き出した
+                elif before is not None and before not in WANTS_YOU and not looking:
+                    if key not in self.attention:
+                        fresh = True
+                    self.attention.add(key)
+            if looking:
+                self.attention -= {k for k in self.attention if k[0] == w.folder}
+        self.attention &= alive
+        names = {w.name for w in self.windows if any(k[0] == w.folder for k in self.attention)}
+        self.dock.set_attention({t.hwnd for t in self.dock.tabs
+                                 if any(vscode_title_matches(self.title_of(t.hwnd), n) for n in names)})
+        if fresh:
+            self.dock.flash_taskbar()
 
     def _drain(self) -> None:
         latest = None
@@ -155,8 +210,11 @@ class ClaudePanel:
                 self.windows = data
                 self.status.configure(text="")
                 self.dock.adopt_vscode_windows(data)  # 欄を出していなくても取り込む
+                self._have_scan = True
             else:
                 self.status.configure(text="読めない記録あり")
+        if getattr(self, "_have_scan", False):
+            self.update_attention()  # 窓を見たら消すので、届いたときだけでなく毎回
         if self.visible:
             self.render()
         self.frame.after(500, self._drain)
@@ -187,12 +245,15 @@ class ClaudePanel:
         (動いているセッションは書き込むたびに「たった今」に戻る。1 分で 6 回作り直していた)"""
         now = time.time()
         rows = [(w, self.ordered(w)) for w in self.windows]
-        shape = [(w.folder, tuple(w.urls), [(x.id, x.title or x.last_prompt[:40], tuple(sorted(x.edited)),
-                                             tuple(w.session_urls(x))) for x in ss]) for w, ss in rows]
+        shape = [(w.folder, tuple(w.urls), tuple(sorted((k, v.label()) for k, v in w.git.items())),
+                  [(x.id, x.title or x.last_prompt[:40], tuple(sorted(x.edited)), tuple(w.session_urls(x)))
+                   for x in ss]) for w, ss in rows]
         if shape != self._key:
             self._key = shape
             self._win_buttons: dict[str, tk.Button] = {}
             self._state_labels: dict[tuple[str, str], tuple[tk.Label, tk.Label]] = {}
+            self._title_buttons = {}
+            self._attn_drawn = None
             for c in self.inner.winfo_children():
                 c.destroy()
             if not self.windows:
@@ -203,10 +264,17 @@ class ClaudePanel:
             self._active = None  # 色を塗り直させる
         # 書き換えるだけのもの
         active = self.active_folder()
-        if active != self._active:
-            self._active = active
-            for folder, b in self._win_buttons.items():
-                b.configure(bg=WIN_ACTIVE if folder == active else WIN_BG)
+        attn = frozenset(self.attention)
+        if active != self._active or attn != self._attn_drawn:
+            self._active, self._attn_drawn = active, attn
+            for w, _ in rows:
+                b = self._win_buttons.get(w.folder)
+                if not b:
+                    continue
+                n = sum(1 for k in attn if k[0] == w.folder)
+                b.configure(bg=self._win_color(w.folder), text=f"▣ {w.name}" + (f"   待ち {n}" if n else ""))
+            for key, b in self._title_buttons.items():
+                b.configure(bg=ROW_ATTN if key in attn else ROW_BG)
         for w, ss in rows:
             for x in ss:
                 labels = self._state_labels.get((w.folder, x.id))
@@ -226,15 +294,26 @@ class ClaudePanel:
                       activeforeground=FG, relief=tk.FLAT, bd=0, padx=8, pady=4, font=self.font_bold, cursor="hand2",
                       command=lambda w=w: self.dock.focus_vscode(w.folder, w.name))
         b.pack(fill=tk.X)
-        # 乗せたときの色。選択中かどうかは後から変わるので、離したときはその時の色に戻す
-        b.bind("<Enter>", lambda e, f=w.folder: b.configure(bg=WIN_ACTIVE if f == self._active else WIN_HOVER), add="+")
-        b.bind("<Leave>", lambda e, f=w.folder: b.configure(bg=WIN_ACTIVE if f == self._active else WIN_BG), add="+")
+        # 乗せたときの色。選択中か・知らせ中かは後から変わるので、離したときはその時の色に戻す
+        b.bind("<Enter>", lambda e, f=w.folder: b.configure(bg=self._win_color(f, hover=True)), add="+")
+        b.bind("<Leave>", lambda e, f=w.folder: b.configure(bg=self._win_color(f)), add="+")
         self._win_buttons[w.folder] = b
         Tooltip(b, f"{w.folder}\nこの VS Code の窓へ切り替える")
+        g = w.git.get(cs.git_root(w.folder) or "")
+        if g and g.label():  # やり残しの札 (押せない)
+            tk.Label(card, text=g.label(), bg=CARD_BG, fg=GIT_FG, font=self.font_small, anchor=tk.W).pack(
+                fill=tk.X, padx=(10, 0))
         for url, name in w.urls:
             self._link(card, w, url, name, indent=10, added=url in w.added)
         for x in sessions:
             self._session_row(card, w, x)
+
+    def _win_color(self, folder: str, hover: bool = False) -> str:
+        if folder == self._active:
+            return WIN_ACTIVE
+        if any(k[0] == folder for k in self.attention):
+            return ATTN_HOVER if hover else ATTN_BG
+        return WIN_HOVER if hover else WIN_BG
 
     def _session_row(self, parent: tk.Misc, w: cs.Window, s: cs.Session) -> None:
         row = tk.Frame(parent, bg=CARD_BG)
@@ -251,7 +330,10 @@ class ClaudePanel:
                       activebackground=ROW_HOVER, activeforeground=FG, relief=tk.FLAT, bd=0, padx=6, pady=2,
                       font=self.font, cursor="hand2", command=lambda: self.dock.focus_vscode(w.folder, w.name))
         b.pack(fill=tk.X)
-        hover(b, ROW_BG, ROW_HOVER)
+        key = (w.folder, s.id)
+        self._title_buttons[key] = b
+        b.bind("<Enter>", lambda e: b.configure(bg=ROW_ATTN_HOVER if key in self.attention else ROW_HOVER), add="+")
+        b.bind("<Leave>", lambda e: b.configure(bg=ROW_ATTN if key in self.attention else ROW_BG), add="+")
         tip = [title]
         if s.last_prompt:
             tip.append(f"最後の依頼: {s.last_prompt[:120]}")
@@ -263,8 +345,13 @@ class ClaudePanel:
         for root in sorted(s.edited):
             if cs.same_path(root, w.folder):
                 continue
-            tk.Label(row, text=f"✎ {os.path.basename(root)}", bg=CARD_BG, fg="#c4b5fd", font=self.font_small,
-                     anchor=tk.W).pack(fill=tk.X, padx=(6, 0))
+            g = w.git.get(root)
+            line = tk.Frame(row, bg=CARD_BG)
+            line.pack(fill=tk.X, padx=(6, 0))
+            tk.Label(line, text=f"✎ {os.path.basename(root)}", bg=CARD_BG, fg="#c4b5fd", font=self.font_small).pack(
+                side=tk.LEFT)
+            if g and g.label():
+                tk.Label(line, text=f"  {g.label()}", bg=CARD_BG, fg=GIT_FG, font=self.font_small).pack(side=tk.LEFT)
         for url in w.session_urls(s):
             self._link(row, w, url, "", indent=6)
 

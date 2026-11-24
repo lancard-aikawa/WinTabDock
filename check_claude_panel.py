@@ -120,6 +120,16 @@ def step0():
     check(f"選んだ窓はドックの中にある ({have} / {want})", all(abs(a - b) <= 2 for a, b in zip(want, have)))
     log = (SP / "home" / "remote.log").read_text(encoding="utf-8") if (SP / "home" / "remote.log").exists() else ""
     check("出し直しを直したことが記録に残る", "隠した" in log or "置き直した" in log)
+    # 返事待ちの知らせ: 選んでいないタブは橙、選んだら選択中の色 (欄が次に取り直す前に、すぐ見る)
+    back = next(t for t in d.tabs if t is not d.active)
+    d.set_attention({back.hwnd})
+    check("知らせ中の選んでいないタブは橙", back.button.cget("bg") == w.TAB_ATTN)
+    front = d.active
+    d.select(back)
+    check("知らせ中でも選べば選択中の色", back.button.cget("bg") == w.TAB_ACTIVE
+          and front.button.cget("bg") == w.TAB_BG)
+    d.set_attention(set())
+    d.select(front)
     t2 = next(t for t in d.tabs if t.hwnd == hwnd2)
     d.release(t2)
     proc2.kill()

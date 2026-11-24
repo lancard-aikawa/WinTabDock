@@ -42,6 +42,11 @@ from claude_panel import ClaudePanel  # 左の「Claude」の欄 (VS Code の窓
 
 # ── Win32 ────────────────────────────────────────────────────────────────────
 
+
+class FLASHWINFO(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_uint), ("hwnd", ctypes.c_void_p), ("dwFlags", ctypes.c_uint),
+                ("uCount", ctypes.c_uint), ("dwTimeout", ctypes.c_uint)]
+
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
@@ -527,6 +532,7 @@ def bgrx_photo(w: int, h: int, bgrx: bytes) -> tk.PhotoImage:
 
 
 TAB_BG, TAB_ACTIVE, TAB_FG, TAB_FG_DIM, BAR_BG ="#252542", "#7c3aed", "#ffffff", "#9a9ab8", "#1a1a2e"
+TAB_ATTN = "#b45309"  # Claude が返事を待っている VS Code のタブ (claude_panel.ATTN_BG と同じ)
 BAR_EDGE = "#7c3aed"  # 帯の下の区切り線と「設定」の枠 (アイコンの縁取りと同系の紫)
 
 
@@ -542,6 +548,7 @@ class Dock:
         self.prefs_path = prefs_path or STATE_DIR / "settings.json"
         self.prefs = self.load_prefs()
         self.ignored: set[int] = set()  # 「ドックから外す」で外した窓。すぐ自動で取り込み直さない
+        self.attention: set[int] = set()  # Claude の欄が知らせている VS Code の窓 (タブを橙にする)
         self.remote_settings = settings.get("remote", {})  # wintabdock.toml の [remote] (host, port)
         self.remote_server: remote.Server | None = None
         self._remote_starting = False  # 待ち受けの準備中 (noVNC の取得など。別のスレッド)
@@ -860,7 +867,7 @@ class Dock:
         if select or not self.active:
             self.select(tab)
         else:
-            tab.button.configure(bg=TAB_BG, fg=TAB_FG_DIM, font=self.band_font)
+            self.style_tab(tab)
         return tab
 
     def release(self, tab: Tab) -> None:
@@ -895,8 +902,7 @@ class Dock:
         self.close_launch_panel(show=False)  # 一覧を開いたままタブを押した
         for t in self.tabs:
             on = t is tab
-            t.button.configure(bg=TAB_ACTIVE if on else TAB_BG, fg=TAB_FG if on else TAB_FG_DIM,
-                               font=self.band_bold if on else self.band_font)
+            self.style_tab(t, on)
             if not on:
                 if t is self.active:
                     self.remember_thumb(t)  # 隠すと真っ黒にしか写らないので、隠す前に撮っておく
@@ -910,6 +916,31 @@ class Dock:
             # 遠隔からつないでいる間は、切り替えたツールに合わせて大きさを合わせ直す (最小の幅のあるツールなら縦に伸ばす)。
             # 合わせ直しは Tk のスレッドの仕事を待つので、別のスレッドから頼む
             threading.Thread(target=view.resize, args=view.requested, daemon=True).start()
+
+    def style_tab(self, t: Tab, on: bool | None = None) -> None:
+        """タブのボタンの色。選んでいるもの > 知らせ中 (橙) > ほか"""
+        on = (t is self.active) if on is None else on
+        if on:
+            t.button.configure(bg=TAB_ACTIVE, fg=TAB_FG, font=self.band_bold)
+        elif t.hwnd in self.attention:
+            t.button.configure(bg=TAB_ATTN, fg=TAB_FG, font=self.band_bold)
+        else:
+            t.button.configure(bg=TAB_BG, fg=TAB_FG_DIM, font=self.band_font)
+
+    def set_attention(self, hwnds: set[int]) -> None:
+        """Claude の欄から: 返事を待っているセッションのある VS Code の窓"""
+        if hwnds == self.attention:
+            return
+        self.attention = set(hwnds)
+        for t in self.tabs:
+            self.style_tab(t)
+
+    def flash_taskbar(self) -> None:
+        """タスクバーのドックのボタンを 3 回だけ光らせる (人がドックを見ていないとき)"""
+        if user32.GetForegroundWindow() == self.hwnd or (self.active and user32.GetForegroundWindow() == self.active.hwnd):
+            return
+        info = FLASHWINFO(ctypes.sizeof(FLASHWINFO), self.hwnd, 0x2, 3, 0)  # FLASHW_TRAY
+        user32.FlashWindowEx(ctypes.byref(info))
 
     def body_rect(self) -> tuple[int, int, int, int]:
         self.root.update_idletasks()
