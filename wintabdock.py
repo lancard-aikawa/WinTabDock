@@ -38,6 +38,7 @@ import qrcodegen  # QR コードを作る (Project Nayuki、MIT。1 ファイル
 import remote
 import tlscert  # 遠隔の HTTPS の証明書を作る (標準ライブラリだけ)
 import uia  # 本物のマウスしか受けない部品 (エクスプローラーの上の部分) を押す
+from claude_panel import ClaudePanel  # 左の「Claude」の欄 (VS Code の窓ごとの Claude Code のセッション)
 
 # ── Win32 ────────────────────────────────────────────────────────────────────
 
@@ -358,6 +359,7 @@ class Tab:
     maximized: bool = False  # 取り込む前に最大化していた (外すときに最大化に戻す)
     button_hwnd: int = 0  # タブのボタンの窓。遠隔から押してよい所か見分けるため (別のスレッドから Tk に触らない)
     thumb: tuple[int, int, bytes] | None = None  # スマホの「一覧」に出す絵 (幅, 高さ, BGRX)。最後に表に出ていた時のもの
+    vscode: bool = False  # Claude の欄から取り込んだ VS Code の窓。ドックを閉じるときも閉じずに元の窓に戻す
 
 
 class RemoteSource:
@@ -583,6 +585,12 @@ class Dock:
         self.settings_button.pack()
         self.menu_button = tk.Button(self.bar, text="+ 起動 / 取り込む", command=self.show_menu, bg=TAB_BG, fg=TAB_FG,
                                      relief=tk.FLAT, activebackground=TAB_ACTIVE, padx=10)
+        # 左の「Claude」の欄を出す・しまう。「設定」と同じ紫の枠 (出している間は塗る)
+        self.claude_frame = tk.Frame(self.bar, bg=BAR_EDGE, padx=1, pady=1)
+        self.claude_button = tk.Button(self.claude_frame, text="◧ Claude", command=self.toggle_claude_panel, bg=BAR_BG,
+                                       fg=TAB_FG, relief=tk.FLAT, activebackground=TAB_ACTIVE, padx=10, bd=0,
+                                       cursor="hand2")
+        self.claude_button.pack()
         self.pack_bar_buttons()
         # スマホとつないでいる間だけ「+ 起動」「設定」の代わりに出す、表示倍率のボタン (remote_connected で入れ替える)
         self.zoom_frame = tk.Frame(self.bar, bg=BAR_BG)
@@ -628,6 +636,7 @@ class Dock:
         tk.Frame(self.root, bg=BAR_EDGE, height=2).pack(side=tk.TOP, fill=tk.X)
         self.body = tk.Frame(self.root, bg="#0d0d1a")
         self.body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self.claude_panel = ClaudePanel(self, self.root, window_title)
         self.empty = tk.Label(self.body, text="右上の「+ 起動 / 取り込む」からツールを開きます",
                               bg="#0d0d1a", fg=TAB_FG_DIM)
         self.empty.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
@@ -636,6 +645,9 @@ class Dock:
         self.root.bind("<Unmap>", lambda e: self.on_minimize() if e.widget is self.root else None)
         self.root.bind("<Map>", lambda e: self.on_restore() if e.widget is self.root else None)
         self._layout_pending = False
+        self._last_fix: tuple | None = None  # keep_tabs_in_place が最後に直したずれ
+        if self.prefs.get("claude_panel", True):
+            self.set_claude_panel(True, save=False)
         self.root.after(500, self.poll)
         # 窓が現れたことはフックで受ける (自動取り込みと、遠隔でつないでいる間に開いた窓をタブにするため)。
         # フックは別スレッドで受け、キューで渡す (tkinter の mainloop と同じスレッドで ctypes のコールバックを
@@ -812,9 +824,9 @@ class Dock:
             return
         self.adopt(tool["name"], hwnd)
 
-    def adopt(self, name: str, hwnd: int) -> None:
+    def adopt(self, name: str, hwnd: int, select: bool = True) -> Tab | None:
         if any(t.hwnd == hwnd for t in self.tabs) or hwnd == self.hwnd:
-            return
+            return None
         # 最大化した窓は、ドックが大きさと位置を決めても、画面いっぱいのまま動かない (VS Code の新しい窓は最大化して開く。
         # 画面いっぱいのまま重なり、スマホでは帯ごと隠れた)。最大化を解いてから控え、外すときに最大化に戻す
         maximized = False
@@ -845,7 +857,11 @@ class Dock:
         tab.button.pack(side=tk.LEFT, padx=(4, 0), pady=4)
         tab.button_hwnd = tab.button.winfo_id()
         self.empty.place_forget()
-        self.select(tab)
+        if select or not self.active:
+            self.select(tab)
+        else:
+            tab.button.configure(bg=TAB_BG, fg=TAB_FG_DIM, font=self.band_font)
+        return tab
 
     def release(self, tab: Tab) -> None:
         self.ignored.add(tab.hwnd)  # 元に戻すと窓が現れるので、自動取り込みがすぐ取り込み直してしまう
@@ -943,7 +959,28 @@ class Dock:
                 and not self.launch_panel):  # 一覧を開いている間は隠している (置き直すと出てしまう)
             self.remote_log(f"「{self.active.name}」が最大化したので、解いてドックに収め直した")
             self.place_active()  # 表示中のツールが自分で最大化した。最大化を解いて置き直す
+        self.keep_tabs_in_place()
         self.root.after(500, self.poll)
+
+    def keep_tabs_in_place(self) -> None:
+        """タブにした窓が、自分で出たり動いたりしたら戻す。VS Code の窓をまとめて自動で取り込むと、起動した直後に
+        選んでいないタブの窓まで見えたまま、選んだ窓も元の位置のままで、ドックを触るまで揃わなかった (ユーザーの報告、
+        2026-11-24)。直したときは remote.log に書く (何が起きていたかを後で見るため)"""
+        if self._closing or not self.tabs or self.launch_panel or self.root.state() == "iconic":
+            return
+        for t in self.tabs:
+            if t is not self.active and user32.IsWindowVisible(t.hwnd):
+                self.remote_log(f"選んでいない「{t.name}」の窓が見えていたので隠した ({rect_of(t.hwnd)})")
+                user32.ShowWindow(t.hwnd, SW_HIDE)
+        t = self.active
+        if t and user32.IsWindowVisible(t.hwnd) and not user32.IsZoomed(t.hwnd):
+            want = self.body_rect()
+            have = rect_of(t.hwnd)
+            # 最小の大きさのあるツールは置き直しても同じずれが残る。同じずれは 1 回だけ直す (0.5 秒ごとに置き直し続けない)
+            if any(abs(a - b) > 2 for a, b in zip(want, have)) and self._last_fix != (t.hwnd, want, have):
+                self._last_fix = (t.hwnd, want, have)
+                self.remote_log(f"「{t.name}」の窓がドックの中とずれていたので置き直した ({have} → {want})")
+                self.place_active()
 
     # ── メニュー ──
     def show_menu(self) -> None:
@@ -984,6 +1021,9 @@ class Dock:
             on_close.add_radiobutton(label=label, value=mode, variable=self._on_close_var,
                                      command=lambda: self.set_on_close(self._on_close_var.get()))
         m.add_cascade(label="閉じるときのツール", menu=on_close)
+        self._auto_vscode_var = tk.BooleanVar(value=self.auto_vscode)
+        m.add_checkbutton(label="VS Code の窓を自動でタブにする (Claude の欄)", variable=self._auto_vscode_var,
+                          command=lambda: self.set_auto_vscode(self._auto_vscode_var.get()))
         if FROZEN:  # ソースから動かしているときは、登録する起動コマンドが定まらないので出さない
             self._autostart_var = tk.BooleanVar(value=autostart_enabled())
             m.add_checkbutton(label="ログイン時に起動する", variable=self._autostart_var,
@@ -1373,6 +1413,9 @@ class Dock:
             # 遠隔からは押せない「+ 起動」「設定」を外し、表示倍率のボタンを出す
             self.menu_button.pack_forget()
             self.settings_frame.pack_forget()
+            self.claude_frame.pack_forget()
+            self._claude_before_remote = self.claude_panel.visible  # スマホの幅には入らないので、つないでいる間はしまう
+            self.claude_panel.hide()
             self.show_zoom()
             self.apply_band_scale()
             # タブより先に場所を取る (タブが多いと、後から並べた帯の右端のボタンが切れて押せなかった)
@@ -1403,6 +1446,8 @@ class Dock:
             for t in self.tabs:
                 t.thumb = None  # スマホのためだけに覚えていた絵。PC では使わない
             self.pack_bar_buttons()
+            if getattr(self, "_claude_before_remote", False):
+                self.claude_panel.show(before=self.body)
             self.apply_band_scale()  # PC の大きさに戻す
             self.root.maxsize(*self._remote_maxsize)
             self.root.geometry(geometry)
@@ -1627,9 +1672,83 @@ class Dock:
             self.place_active(show=True)
 
     def pack_bar_buttons(self) -> None:
-        """帯の右端に「設定」と「+ 起動 / 取り込む」を置く (side=RIGHT は先に置いたものほど右に並ぶ)。"""
+        """帯の右端に「設定」「+ 起動 / 取り込む」「Claude」を置く (side=RIGHT は先に置いたものほど右に並ぶ)。"""
         self.settings_frame.pack(side=tk.RIGHT, padx=(0, 8), pady=4)
         self.menu_button.pack(side=tk.RIGHT, padx=6, pady=4)
+        self.claude_frame.pack(side=tk.RIGHT, padx=(6, 0), pady=4)
+
+    # ── Claude の欄 ──
+    def toggle_claude_panel(self) -> None:
+        self.set_claude_panel(not self.claude_panel.visible)
+
+    def set_claude_panel(self, on: bool, save: bool = True) -> None:
+        if on:
+            self.claude_panel.show(before=self.body)
+        else:
+            self.claude_panel.hide()
+        self.claude_button.configure(bg=TAB_ACTIVE if on else BAR_BG)
+        if save:
+            self.prefs["claude_panel"] = on
+            self.save_prefs()
+        self.after_layout()  # 本体の幅が変わるので、選んでいるツールを置き直す
+
+    @property
+    def auto_vscode(self) -> bool:
+        return self.prefs.get("auto_vscode", True)
+
+    def set_auto_vscode(self, on: bool) -> None:
+        self.prefs["auto_vscode"] = on
+        self.save_prefs()
+        if on:
+            self.adopt_vscode_windows(self.claude_panel.windows)
+
+    def vscode_window_of(self, name: str) -> int | None:
+        """まだタブにしていない、そのフォルダの VS Code の窓"""
+        from claude_panel import vscode_title_matches
+        for hwnd in top_windows():
+            if (hwnd != self.hwnd and process_path(window_pid(hwnd)).lower().endswith("code.exe")
+                    and vscode_title_matches(window_title(hwnd), name)):
+                return hwnd
+        return None
+
+    def adopt_vscode_windows(self, windows: list) -> None:
+        """Claude の欄に出ている VS Code の窓 (~/.claude/ide に載っているもの) を、まだなら自動でタブにする。
+        欄の一覧が更新されるたびに呼ぶので、ドックを開いたときに開いていた窓も、あとから開いた窓も取り込む。
+        「ドックから外す」で外した窓は取り込み直さない。人がいま使っている窓 (前面) だけ選び、ほかは裏のタブにする
+        (裏で取り込んだ窓が急に前に出ると、打っている途中の文字が別の窓に入る)"""
+        if not self.auto_vscode or self._closing or self._remote_geometry:
+            return
+        from claude_panel import vscode_title_matches
+        for w in windows:
+            if any(t.vscode and vscode_title_matches(window_title(t.hwnd), w.name) for t in self.tabs):
+                continue
+            hwnd = self.vscode_window_of(w.name)
+            if not hwnd or hwnd in self.ignored or any(t.hwnd == hwnd for t in self.tabs):
+                continue
+            if not user32.IsWindowVisible(hwnd):
+                continue
+            front = user32.GetForegroundWindow() == hwnd
+            tab = self.adopt(w.name, hwnd, select=front)
+            if tab:
+                tab.vscode = True
+                self.remote_log(f"VS Code の窓を自動でタブにした: {w.name}")
+
+    def focus_vscode(self, folder: str, name: str) -> None:
+        """そのフォルダを開いている VS Code の窓へ切り替える。タブにしていなければ取り込む"""
+        from claude_panel import vscode_title_matches
+        for t in self.tabs:
+            if t.exe.endswith("code.exe") and vscode_title_matches(window_title(t.hwnd), name):
+                self.select(t)
+                return
+        for hwnd in top_windows():
+            if (hwnd != self.hwnd and process_path(window_pid(hwnd)).lower().endswith("code.exe")
+                    and vscode_title_matches(window_title(hwnd), name)):
+                self.ignored.discard(hwnd)
+                tab = self.adopt(name, hwnd)
+                if tab:
+                    tab.vscode = True
+                return
+        print(f"[WinTabDock] {folder} を開いている VS Code の窓が見つかりません", file=sys.stderr)
 
     REMOTE_GUARD = "RemoteGuard"  # PC の画面に出す窓の部品の先頭に付ける bindtag
 
@@ -1726,8 +1845,8 @@ class Dock:
         """ドックの × から。取り込んでいるツールを閉じるか残すかは、設定 (または毎回たずねる) に従う。"""
         if self._closing:
             return  # ツールが閉じ終わるのを待っている間に、もう一度 × を押された
-        if not self.tabs or self.on_close_mode == "keep":
-            self.quit()
+        if not any(not t.vscode for t in self.tabs) or self.on_close_mode == "keep":
+            self.quit()  # VS Code だけなら、たずねずに元の窓に戻す
         elif self.on_close_mode == "close":
             self.close_tools_and_quit()
         else:
@@ -1763,8 +1882,9 @@ class Dock:
         self._close_remember = tk.Checkbutton(win, text="次からたずねない (メニューの「閉じるときのツール」で戻せる)",
                                               variable=remember)
         self._close_remember.pack(side=tk.BOTTOM, anchor=tk.W, padx=10)
-        names = "、".join(t.name for t in self.tabs)
-        tk.Label(win, text=f"取り込んでいるツール ({names}) も閉じますか？\n残す場合は、元の窓に戻ります。",
+        names = "、".join(t.name for t in self.tabs if not t.vscode)
+        note = "\nVS Code の窓は閉じずに、元の窓に戻します。" if any(t.vscode for t in self.tabs) else ""
+        tk.Label(win, text=f"取り込んでいるツール ({names}) も閉じますか？\n残す場合は、元の窓に戻ります。{note}",
                  justify=tk.LEFT).pack(side=tk.TOP, anchor=tk.W, padx=12, pady=(12, 6))
         win.protocol("WM_DELETE_WINDOW", lambda: choose(None))
         win.update_idletasks()
@@ -1781,14 +1901,15 @@ class Dock:
         self.save_session()  # 閉じる前の並びを覚える (次回「前回開いていたもの」で開けるように)
         self._closing = True  # 以降、タブが減るたびに前回の並びを上書きしない。自動取り込みもしない
         for t in list(self.tabs):
-            user32.PostMessageW(t.hwnd, WM_CLOSE, 0, 0)
+            if not t.vscode:  # VS Code は閉じない (中の Claude の会話ごと閉じてしまう)。quit で元の窓に戻す
+                user32.PostMessageW(t.hwnd, WM_CLOSE, 0, 0)
         deadline = time.time() + self.CLOSE_WAIT_S
 
         def wait() -> None:
             for t in list(self.tabs):
                 if not user32.IsWindow(t.hwnd):
                     self.forget(t)
-            if self.tabs and time.time() < deadline:
+            if any(not t.vscode for t in self.tabs) and time.time() < deadline:
                 self.root.after(200, wait)
             else:
                 self.quit()  # 残ったものは元の窓に戻す

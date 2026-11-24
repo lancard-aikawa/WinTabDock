@@ -49,6 +49,32 @@ uv run demo/shoot.py            # README の画面 (架空のデモアプリを�
 - 所有者を変えると、ドックが落ちたときに相手の窓まで壊れる、と心配していたが、実験では窓もプロセスも残った
   (`experiments/owner_probe.py`)
 
+## Claude の欄 (`claude_panel.py`・`claude_sessions.py`)
+
+- 窓の一覧は `~/.claude/ide/*.lock`。Claude Code の拡張が VS Code の窓ごとに 1 つ書き、`workspaceFolders` を持つ。
+  `pid` はどの窓も同じ (VS Code は 1 つのプロセス) なので、窓との対応は題名で取る。題名は
+  「前のタブ - フォルダ名 - Visual Studio Code」で、前のタブが Claude のチャットならセッションの題名になる
+- セッションは `~/.claude/projects/<フォルダの英数字以外を -に>/*.jsonl`。フォルダ名は `C--` と `c--` が混ざるので大文字小文字を無視して探す。
+  記録は数 MB になるので、ファイルごとに読んだ位置を覚えて増えた分だけ読む (最初の 1 回は全部で数秒かかる。別のスレッドで回す)
+- 状態: 記録が 15 秒以内に増えた = 動作中、最後の返事が道具を呼ばずに終わった = 返事待ち、それ以外 = 道具の途中 (許可待ちを含む)
+- 欄の一覧は 3 秒ごとに取り直すが、作り直すのは形 (窓・セッション・題名・編集先・URL) が変わったときだけ。状態・時刻・選択中の色は
+  部品の文字と色を書き換えるだけにする。全部作り直していたときは、動いているセッションの「たった今」と「1分前」が行き来するたびに
+  欄が消えて描き直され、ちらついた (1 分で 6 回)。セッションの並びも、新しいセッションが出たときだけ変える
+- 自動取り込みは欄の一覧が届くたび (3 秒ごと) に `adopt_vscode_windows` で行う。VS Code の新しい窓は、出た直後は題名に
+  フォルダ名が無く、ロックファイルもまだ無いので、窓が出たとき (WinEvent) ではなく一覧に載ってから取り込む
+- **タブにした窓が自分で出たり動いたりしたら戻す** (`keep_tabs_in_place`、`poll` から 0.5 秒ごと): VS Code の窓を自動で取り込んだ直後に、
+  選んでいないタブの窓が見えたまま・選んだ窓が元の位置のままで、ドックを触るまで揃わなかった (ユーザーの報告、2026-11-24)。
+  VS Code が取り込まれた後で自分で窓を出し直すためと見ているが、本物で取り込んだ直後の位置は記録していない (直したときは remote.log に書く)。
+  最小の大きさのあるツールで置き直し続けないよう、同じずれは 1 回だけ直す
+- `uv run check_claude_panel.py`: 題名を VS Code に似せた Tk の窓を立て、偽の `~/.claude` にそれだけを載せて、自動取り込み・外した窓・
+  設定の切り替え・「ツールも閉じる」で残ることを見る (人の VS Code には触らない)。本物の VS Code を `--user-data-dir` を分けて
+  起動する形は、人の VS Code が裏で更新を入れている間 (CodeSetup が動いている間) は窓が出ずに終わった。
+  check_remote と同じく、ふだんは人の画面に出ない別のデスクトップ (`experiments/hidden_desktop.py`) で流す (`--here` で人の画面)。
+  keep_tabs_in_place を外すと、別のデスクトップでも「選んでいないタブの窓は隠れている」と記録の 2 項目が落ちる (2026-11-24 確認)。
+  試験を差し替えて流し直すときは runpy で包まない (`rerun_inside` が `sys.argv[0]` を起動し直すので、子は差し替えのない元の試験になる)
+- 窓に触らずに対応だけ見るには、`claude_sessions.Scanner().windows()` の名前と、`top_windows()` の Code.exe の題名を
+  `claude_panel.vscode_title_matches` で突き合わせる。試験のドックで本物の VS Code を取り込むと、試験を落としたときに窓が隠れたまま残る
+
 ## 確かめ方 (自分のツール PortWho・RepoTether などを使う。対象のツールとほかのドックを閉じてから流す)
 
 ```sh
@@ -57,6 +83,7 @@ uv run check_rescue.py LPortMan                  # 取り込んだまま落と�
 uv run check_state_files.py                      # 動いているドックの控えに触らないか (窓には触れない)
 uv run check_session.py PortWho RepoTether       # 前回のタブ: 起動中なら取り込み、なければ起動して並べ直すか
 uv run check_startup.py PortWho RepoTether       # 起動時に開く: 選び方ごとに開くもの・起動するものが変わるか
+uv run check_claude_panel.py                     # Claude の欄: VS Code の窓の自動取り込み (VS Code に似せた窓で。人の VS Code には触らない。人の画面に出ない別のデスクトップで流す。13 項目)
 uv run check_taskbar.py PortWho RepoTether       # ドックを閉じたあと、ツールがタスクバーに戻るか (UI Automation で見る)
 uv run check_close.py PortWho RepoTether         # × を押したとき: 一緒に閉じる / 残す / たずねる / × を無視するアプリ
 ```
