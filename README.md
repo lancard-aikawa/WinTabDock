@@ -52,6 +52,15 @@ VS Code で Claude Code を使っているときに、どの窓で何をして�
 - ↗ は見る URL です。押すと既定のブラウザで開きます
   - 窓の下: [LPortMan](https://github.com/lancard-aikawa/LPortMan) の台帳 (`~/.lportman/ports.json`) で、そのフォルダか編集したリポジトリに予約したポート
   - セッションの下: 会話に出た `localhost`・`127.0.0.1` と、`*.workers.dev`・`*.pages.dev` などの公開先 (記事や資料の URL は出しません)
+  - ↗ を右クリックすると隠せます (その窓だけ / 全部の窓)
+- **Claude に URL を足させる・隠させる**: Claude のセッションから次のコマンドを打つと、その窓の下に出ます
+  (窓は打った場所のフォルダから決まります)。Claude に使わせるには、`~/.claude/CLAUDE.md` に使い方を書いておきます
+  ```
+  uv run --no-project <WinTabDock のフォルダ>/claude_sessions.py link add <URL> --name 本番
+  uv run --no-project <WinTabDock のフォルダ>/claude_sessions.py link hide <URL>     # --all で全部の窓
+  uv run --no-project <WinTabDock のフォルダ>/claude_sessions.py link remove|unhide|list ...
+  ```
+  控えは `%LOCALAPPDATA%\WinTabDock\claude_links.json` です
 - 読むのは `~/.claude/ide/*.lock` (開いている窓) と `~/.claude/projects/*/*.jsonl` (会話の記録) だけで、どちらにも書きません。
   単独でも `uv run claude_sessions.py` で同じ一覧を文字で出せます
 

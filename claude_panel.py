@@ -2,7 +2,7 @@
 
 - 窓の行を押すと、その VS Code の窓をタブにして (取り込み済みならそのタブへ) 切り替える
 - セッションの行を押しても、その窓へ切り替える (VS Code の中のどのチャットのタブかまでは外から選べない)
-- URL を押すと既定のブラウザで開く
+- URL を押すと既定のブラウザで開く。右クリックで隠す (claude_links.json に書く。Claude からは claude_sessions.py link で足す・隠す)
 
 一覧づくり (claude_sessions.Scanner) は別のスレッドで回し、Tk はこのスレッドからだけ触る。
 """
@@ -108,6 +108,7 @@ class ClaudePanel:
         self._state_labels = {}
         self._results: queue.SimpleQueue = queue.SimpleQueue()
         self._stop = threading.Event()
+        self._wake = threading.Event()  # 欄から URL を隠したときに、すぐ取り直させる
         self.visible = False
         threading.Thread(target=self._scan_loop, daemon=True).start()
         self.frame.after(300, self._drain)
@@ -123,6 +124,7 @@ class ClaudePanel:
 
     def stop(self) -> None:
         self._stop.set()
+        self._wake.set()
 
     def _wheel(self, e: tk.Event) -> None:
         w = e.widget
@@ -140,7 +142,8 @@ class ClaudePanel:
                 self._results.put(("ok", wins, time.time()))
             except Exception as e:  # 読めないファイルなどで止めない
                 self._results.put(("error", repr(e), time.time()))
-            self._stop.wait(SCAN_SECONDS)
+            self._wake.wait(SCAN_SECONDS)
+            self._wake.clear()
 
     def _drain(self) -> None:
         latest = None
@@ -185,7 +188,7 @@ class ClaudePanel:
         now = time.time()
         rows = [(w, self.ordered(w)) for w in self.windows]
         shape = [(w.folder, tuple(w.urls), [(x.id, x.title or x.last_prompt[:40], tuple(sorted(x.edited)),
-                                             tuple(x.urls[:3])) for x in ss]) for w, ss in rows]
+                                             tuple(w.session_urls(x))) for x in ss]) for w, ss in rows]
         if shape != self._key:
             self._key = shape
             self._win_buttons: dict[str, tk.Button] = {}
@@ -229,7 +232,7 @@ class ClaudePanel:
         self._win_buttons[w.folder] = b
         Tooltip(b, f"{w.folder}\nこの VS Code の窓へ切り替える")
         for url, name in w.urls:
-            self._link(card, url, name, indent=10)
+            self._link(card, w, url, name, indent=10, added=url in w.added)
         for x in sessions:
             self._session_row(card, w, x)
 
@@ -262,18 +265,42 @@ class ClaudePanel:
                 continue
             tk.Label(row, text=f"✎ {os.path.basename(root)}", bg=CARD_BG, fg="#c4b5fd", font=self.font_small,
                      anchor=tk.W).pack(fill=tk.X, padx=(6, 0))
-        for url in s.urls[:3]:
-            self._link(row, url, "", indent=6)
+        for url in w.session_urls(s):
+            self._link(row, w, url, "", indent=6)
 
-    def _link(self, parent: tk.Misc, url: str, name: str, indent: int) -> None:
+    def _link(self, parent: tk.Misc, w: cs.Window, url: str, name: str, indent: int, added: bool = False) -> None:
         edge = tk.Frame(parent, bg=LINK_EDGE, padx=1, pady=1)  # 枠 (Windows の tk.Button は枠線を描かないので包む)
         edge.pack(anchor=tk.W, padx=(indent, 4), pady=(2, 0))
         short = re.sub(r"^https?://", "", url)
         if len(short) > 38:  # 同じサイトの別のページが同じ見た目にならないよう、真ん中を省いて末尾を残す
             short = short[:16] + "…" + short[-20:]
-        b = tk.Button(edge, text=f"↗ {short}", bg=CARD_BG, fg=LINK_FG, activebackground=LINK_HOVER,
+        # 頼んで足したものは名前を前に出す (どれが本番か、を URL で読み分けなくて済むように)
+        text = f"↗ {name}  {short}" if added and name else f"↗ {short}"
+        if len(text) > 44:
+            text = f"↗ {name}"
+        b = tk.Button(edge, text=text, bg=CARD_BG, fg=LINK_FG, activebackground=LINK_HOVER,
                       activeforeground=LINK_FG, relief=tk.FLAT, bd=0, padx=6, pady=0, font=self.font_small,
                       cursor="hand2", command=lambda: webbrowser.open(url))
         b.pack()
         hover(b, CARD_BG, LINK_HOVER)
-        Tooltip(b, f"{name}\n{url}" if name else url)
+        Tooltip(b, "\n".join(x for x in (name, url, "右クリック: 隠す") if x))
+        b.bind("<Button-3>", lambda e: self._link_menu(e, w, url, added))
+
+    def _link_menu(self, e: tk.Event, w: cs.Window, url: str, added: bool) -> None:
+        m = tk.Menu(self.frame, tearoff=False)
+        m.add_command(label="開く", command=lambda: webbrowser.open(url))
+        m.add_command(label="コピー", command=lambda: (self.frame.clipboard_clear(), self.frame.clipboard_append(url)))
+        m.add_separator()
+        if added:  # Claude に頼んで足したもの
+            m.add_command(label="外す", command=lambda: self._edit_link("remove", url, w.folder))
+        m.add_command(label=f"隠す: {w.name}", command=lambda: self._edit_link("hide", url, w.folder))
+        m.add_command(label="隠す: 全部の窓", command=lambda: self._edit_link("hide", url, cs.ALL))
+        m.tk_popup(e.x_root, e.y_root)
+
+    def _edit_link(self, op: str, url: str, folder: str) -> None:
+        try:
+            cs.edit_links(op, url, folder, path=self.scanner.links_json)
+        except (OSError, ValueError) as ex:
+            self.status.configure(text=f"書けなかった: {ex}")
+            return
+        self._wake.set()  # 3 秒待たずに取り直す

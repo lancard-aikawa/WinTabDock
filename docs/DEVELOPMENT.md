@@ -72,6 +72,11 @@ uv run demo/shoot.py            # README の画面 (架空のデモアプリを�
   check_remote と同じく、ふだんは人の画面に出ない別のデスクトップ (`experiments/hidden_desktop.py`) で流す (`--here` で人の画面)。
   keep_tabs_in_place を外すと、別のデスクトップでも「選んでいないタブの窓は隠れている」と記録の 2 項目が落ちる (2026-11-24 確認)。
   試験を差し替えて流し直すときは runpy で包まない (`rerun_inside` が `sys.argv[0]` を起動し直すので、子は差し替えのない元の試験になる)
+- **URL を足す・隠す** (`claude_sessions.py link`、`claude_links.json`): 窓 (フォルダを normcase した鍵) ごとに `add` と `hide`、
+  `"*"` の `hide` は全部の窓。窓は打った作業フォルダを含む窓のうちいちばん深いもの (資料のフォルダで始めたセッションは資料の窓に出る)。
+  URL は末尾の `/` だけのパスを落として比べる (会話の `localhost:5173/` と台帳の `localhost:5173` を同じにする)。
+  欄の右クリックで書いたときは、取り直しの待ちを起こして 0.5 秒ほどで消える。
+  書くときは一時ファイルから `os.replace` (欄が書きかけを読まない)。`uv run check_claude_links.py` で確かめる (画面に何も出さない。15 項目)
 - 窓に触らずに対応だけ見るには、`claude_sessions.Scanner().windows()` の名前と、`top_windows()` の Code.exe の題名を
   `claude_panel.vscode_title_matches` で突き合わせる。試験のドックで本物の VS Code を取り込むと、試験を落としたときに窓が隠れたまま残る
 
@@ -84,6 +89,7 @@ uv run check_state_files.py                      # 動いているドックの�
 uv run check_session.py PortWho RepoTether       # 前回のタブ: 起動中なら取り込み、なければ起動して並べ直すか
 uv run check_startup.py PortWho RepoTether       # 起動時に開く: 選び方ごとに開くもの・起動するものが変わるか
 uv run check_claude_panel.py                     # Claude の欄: VS Code の窓の自動取り込み (VS Code に似せた窓で。人の VS Code には触らない。人の画面に出ない別のデスクトップで流す。13 項目)
+uv run check_claude_links.py                     # Claude の欄: URL を足す・隠す (link のコマンドと右クリック。画面に何も出さない)
 uv run check_taskbar.py PortWho RepoTether       # ドックを閉じたあと、ツールがタスクバーに戻るか (UI Automation で見る)
 uv run check_close.py PortWho RepoTether         # × を押したとき: 一緒に閉じる / 残す / たずねる / × を無視するアプリ
 ```

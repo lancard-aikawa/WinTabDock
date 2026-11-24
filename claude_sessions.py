@@ -5,10 +5,19 @@
     uv run claude_sessions.py            # 今の一覧を文字で出す
     uv run claude_sessions.py --json     # 同じものを JSON で
 
+欄に出す URL を足す・隠す (Claude のセッションから打ってもらうためのもの。窓は今のフォルダから決める):
+    uv run claude_sessions.py link add <URL> [--name 名前] [--folder 窓のフォルダ]
+    uv run claude_sessions.py link remove <URL> [--folder ...]     # 足したものを外す
+    uv run claude_sessions.py link hide <URL> [--folder ... | --all]  # 会話・台帳から出たものも隠す
+    uv run claude_sessions.py link unhide <URL> [--folder ... | --all]
+    uv run claude_sessions.py link list [--folder ...]
+
 読むもの (どれも読むだけ):
 - ~/.claude/ide/*.lock          開いている VS Code の窓と、そのフォルダ (拡張が窓ごとに 1 つ書く)
 - ~/.claude/projects/<名>/*.jsonl  セッションの記録。題名・最後に動いた時刻・編集したファイル・会話に出た URL
 - ~/.lportman/ports.json       台帳に予約したポート (そのリポジトリの開発サーバの URL として出す)
+書くもの:
+- %LOCALAPPDATA%/WinTabDock/claude_links.json  足した URL・隠した URL (link のときだけ書く)
 """
 from __future__ import annotations
 
@@ -23,6 +32,10 @@ from pathlib import Path
 HOME = Path(os.environ.get("USERPROFILE") or Path.home())
 CLAUDE_DIR = HOME / ".claude"
 PORTS_JSON = HOME / ".lportman" / "ports.json"
+# wintabdock.STATE_DIR と同じ場所 (WINTABDOCK_HOME で変えられる)
+LINKS_JSON = Path(os.environ.get("WINTABDOCK_HOME") or Path(os.environ.get("LOCALAPPDATA", ".")) / "WinTabDock") \
+    / "claude_links.json"
+ALL = "*"  # 隠すとき、どの窓でも隠す
 
 RECENT_SECONDS = 3 * 24 * 3600  # これより前に止まったセッションは出さない
 BUSY_SECONDS = 15  # 記録がこの秒数のうちに増えていれば「動作中」
@@ -81,6 +94,11 @@ def is_view_url(url: str) -> bool:
     return host in LOCAL_HOSTS or host.endswith(DEPLOY_SUFFIXES)
 
 
+def norm_url(url: str) -> str:
+    """http://localhost:5173/ と http://localhost:5173 を同じものにする (末尾の / だけのパスを落とす)"""
+    return re.sub(r"^(https?://[^/?#]+)/$", r"\1", url.strip())
+
+
 def same_path(a: str, b: str) -> bool:
     return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
 
@@ -113,11 +131,83 @@ class Window:
     name: str  # フォルダの名前 (窓の題名の真ん中に出るもの)
     pid: int  # VS Code のプロセス (どの窓も同じ)
     sessions: list[Session] = field(default_factory=list)
-    urls: list[tuple[str, str]] = field(default_factory=list)  # LPortMan の台帳: (URL, 用途)
+    urls: list[tuple[str, str]] = field(default_factory=list)  # 窓の URL: (URL, 名前)。足したもの → LPortMan の台帳の順
+    added: set[str] = field(default_factory=set)  # urls のうち、link add で足したもの
+    hidden: set[str] = field(default_factory=set)  # 隠す URL (この窓の分と、どの窓でも隠す分)
+
+    def session_urls(self, s: Session, n: int = 3) -> list[str]:
+        """セッションの下に出す URL。隠したものと、窓の下に出ているものは出さない"""
+        shown = {u for u, _ in self.urls}
+        return [u for u in s.urls if u not in self.hidden and u not in shown][:n]
 
     def to_json(self) -> dict:
         return {"folder": self.folder, "name": self.name, "pid": self.pid,
-                "sessions": [s.to_json() for s in self.sessions], "urls": self.urls}
+                "sessions": [s.to_json() | {"urls": self.session_urls(s, 8)} for s in self.sessions],
+                "urls": self.urls, "added": sorted(self.added), "hidden": sorted(self.hidden)}
+
+
+# ── 足した URL・隠した URL (claude_links.json) ──
+# {"folders": {"<フォルダ (normcase)>": {"folder": "<元の書き方>", "add": [{"url", "name", "at"}], "hide": [URL...]}}}
+# 隠すときの "*" はどの窓でも隠す。ドックは読むだけ (欄の右クリックで隠すときだけ書く)
+
+def load_links(path: Path = LINKS_JSON) -> dict:
+    try:
+        d = json.loads(path.read_text(encoding="utf-8"))
+        return d if isinstance(d.get("folders"), dict) else {"folders": {}}
+    except (OSError, ValueError, AttributeError):
+        return {"folders": {}}
+
+
+def save_links(d: dict, path: Path = LINKS_JSON) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, path)  # 欄が読みかけの中途半端なファイルを読まない
+
+
+def _entry(d: dict, folder: str) -> dict:
+    key = ALL if folder == ALL else os.path.normcase(os.path.normpath(folder))
+    return d["folders"].setdefault(key, {"folder": folder, "add": [], "hide": []})
+
+
+def _lookup(d: dict, folder: str) -> dict:
+    return d["folders"].get(os.path.normcase(os.path.normpath(folder))) or {}
+
+
+def edit_links(op: str, url: str, folder: str, name: str = "", path: Path = LINKS_JSON) -> str:
+    """op: add / remove / hide / unhide。結果を一言で返す"""
+    url = norm_url(url)
+    if not re.match(r"https?://[^/?#\s]+", url):
+        raise ValueError(f"http:// か https:// で始まる URL を渡す: {url}")
+    d = load_links(path)
+    e = _entry(d, folder)
+    e.setdefault("add", [])
+    e.setdefault("hide", [])
+    where = "どの窓でも" if folder == ALL else Path(folder).name
+    if op == "add":
+        e["add"] = [a for a in e["add"] if a.get("url") != url]
+        e["add"].insert(0, {"url": url, "name": name, "at": int(time.time())})
+        if url in e["hide"]:
+            e["hide"].remove(url)
+        msg = f"{where} に足した: {url}" + (f" ({name})" if name else "")
+    elif op == "remove":
+        before = len(e["add"])
+        e["add"] = [a for a in e["add"] if a.get("url") != url]
+        msg = f"{where} から外した: {url}" if len(e["add"]) < before else f"{where} に足した URL ではない: {url}"
+    elif op == "hide":
+        if url not in e["hide"]:
+            e["hide"].append(url)
+        e["add"] = [a for a in e["add"] if a.get("url") != url]
+        msg = f"{where} で隠した: {url}"
+    elif op == "unhide":
+        msg = f"{where} で出すようにした: {url}" if url in e["hide"] else f"{where} で隠していない: {url}"
+        e["hide"] = [u for u in e["hide"] if u != url]
+    else:
+        raise ValueError(op)
+    if not e["add"] and not e["hide"]:
+        d["folders"] = {k: v for k, v in d["folders"].items() if v is not e}
+    save_links(d, path)
+    return msg
 
 
 def _iso_to_epoch(ts: str) -> float:
@@ -130,9 +220,10 @@ def _iso_to_epoch(ts: str) -> float:
 class Scanner:
     """記録は大きい (数 MB) ので、ファイルごとに読んだ所を覚えて、増えた分だけ読む。"""
 
-    def __init__(self, claude_dir: Path = CLAUDE_DIR, ports_json: Path = PORTS_JSON):
+    def __init__(self, claude_dir: Path = CLAUDE_DIR, ports_json: Path = PORTS_JSON, links_json: Path = LINKS_JSON):
         self.claude_dir = claude_dir
         self.ports_json = ports_json
+        self.links_json = links_json
         self.sessions: dict[str, Session] = {}  # ファイルのパス → Session
 
     # ── 窓 ──
@@ -161,6 +252,8 @@ class Scanner:
         dirs = {p.name.lower(): p for p in (self.claude_dir / "projects").iterdir() if p.is_dir()} \
             if (self.claude_dir / "projects").is_dir() else {}
         registry = self._registry()
+        links = load_links(self.links_json)
+        hide_all = set((links["folders"].get(ALL) or {}).get("hide") or [])
         for w in wins:
             pdir = dirs.get(project_slug(w.folder).lower())
             if pdir:
@@ -179,10 +272,17 @@ class Scanner:
             w.sessions.sort(key=lambda s: -s.updated)
             del w.sessions[MAX_SESSIONS_PER_WINDOW:]
             roots = {w.folder} | {r for s in w.sessions for r in s.edited}
+            mine = _lookup(links, w.folder)
+            w.hidden = hide_all | set(mine.get("hide") or [])
             w.urls = []
+            for a in mine.get("add") or []:  # Claude に頼んで足したものを先に
+                if a.get("url") and a["url"] not in w.hidden:
+                    w.urls.append((a["url"], a.get("name", "")))
+                    w.added.add(a["url"])
             for r in registry:
                 url = f"http://localhost:{r['port']}"
-                if any(same_path(r.get("project", ""), root) for root in roots) and url not in {u for u, _ in w.urls}:
+                if (any(same_path(r.get("project", ""), root) for root in roots) and url not in {u for u, _ in w.urls}
+                        and url not in w.hidden):
                     w.urls.append((url, r.get("name", "")))
         return wins
 
@@ -264,7 +364,7 @@ class Scanner:
     @staticmethod
     def _urls(s: Session, text: str) -> None:
         for m in URL_RE.finditer(text):
-            u = m.group(0).rstrip(URL_TRAIL)
+            u = norm_url(m.group(0).rstrip(URL_TRAIL))
             if not is_view_url(u):
                 continue
             if u in s.urls:
@@ -305,8 +405,65 @@ def ago(seconds: float) -> str:
     return f"{int(seconds // 86400)}日前"
 
 
+def window_for(cwd: str, wins: list[Window]) -> str | None:
+    """作業フォルダ → それを開いている VS Code の窓のフォルダ (いちばん深く含むもの)。無ければ None"""
+    c = os.path.normcase(os.path.normpath(cwd))
+    best = None
+    for w in wins:
+        f = os.path.normcase(os.path.normpath(w.folder))
+        if (c == f or c.startswith(f.rstrip(os.sep) + os.sep)) and (best is None or len(f) > len(best[0])):
+            best = (f, w.folder)
+    return best[1] if best else None
+
+
+def link_main(argv: list[str]) -> int:
+    import argparse
+    p = argparse.ArgumentParser(prog="claude_sessions.py link",
+                                description="WinTabDock の Claude の欄に出す URL を足す・隠す")
+    p.add_argument("op", choices=["add", "remove", "hide", "unhide", "list"])
+    p.add_argument("url", nargs="?")
+    p.add_argument("--name", default="", help="欄に出す名前 (add のとき。例: 本番、プレビュー)")
+    p.add_argument("--folder", help="どの窓か (VS Code で開いているフォルダ)。省くと今のフォルダを開いている窓")
+    p.add_argument("--all", action="store_true", help="どの窓でも (hide / unhide のとき)")
+    a = p.parse_args(argv)
+    wins = Scanner().windows()
+    if a.all:
+        if a.op not in ("hide", "unhide"):
+            p.error("--all は hide / unhide だけ")
+        folder = ALL
+    else:
+        given = a.folder or os.getcwd()
+        folder = window_for(given, wins)
+        if not folder:
+            # 窓が開いていなくても控えておく (その窓を開けば出る)
+            folder = os.path.normpath(given)
+            print(f"注意: {folder} を開いている VS Code の窓が無い。控えておき、開いたら出す", file=sys.stderr)
+    if a.op == "list":
+        d = load_links()
+        e = (d["folders"].get(ALL) or {}) if folder == ALL else _lookup(d, folder)
+        print(f"窓: {folder}")
+        for x in e.get("add") or []:
+            print(f"  足した  {x['url']}" + (f"  ({x['name']})" if x.get("name") else ""))
+        for u in e.get("hide") or []:
+            print(f"  隠した  {u}")
+        for u in (d["folders"].get(ALL) or {}).get("hide") or []:
+            print(f"  隠した  {u}  (どの窓でも)")
+        return 0
+    if not a.url:
+        p.error("URL を渡す")
+    try:
+        print(edit_links(a.op, a.url, folder, a.name))
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 2
+    return 0
+
+
 def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+    if sys.argv[1:2] == ["link"]:
+        sys.exit(link_main(sys.argv[2:]))
     wins = Scanner().scan()
     if "--json" in sys.argv:
         print(json.dumps([w.to_json() for w in wins], ensure_ascii=False, indent=1))
@@ -322,7 +479,7 @@ def main() -> None:
             others = [r for r in s.edited if not same_path(r, w.folder)]
             for r in others:
                 print(f"      編集: {r}")
-            for u in s.urls[:3]:
+            for u in w.session_urls(s):
                 print(f"      URL {u}")
 
 
