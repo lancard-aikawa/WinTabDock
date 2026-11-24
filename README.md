@@ -38,6 +38,9 @@ exe = "C:/Tools/MyTool/MyTool.exe"
 ## Claude の欄 (左)
 
 VS Code で Claude Code を使っているときに、どの窓で何をしているかを一望する欄です。帯の「◧ Claude」で出す・しまう。
+Claude Code の拡張を使っている (`~/.claude/ide` がある) ときだけ、最初から出ています。
+欄は左に幅 290px を取るので、そのぶんツールを置く場所が狭くなります。ドックを狭くすると、最小の幅のあるツールは
+置く場所に収まらず、右にはみ出します。そのときはドックを広げるか、「◧ Claude」で欄をしまいます。
 
 - 開いている VS Code の窓 (Claude Code の拡張が入っているもの) を、フォルダの名前で並べます。押すとその窓をタブにして切り替えます
   (タブにしてあれば、そのタブへ)
@@ -53,9 +56,9 @@ VS Code で Claude Code を使っているときに、どの窓で何をして�
   - 窓の下と ✎ の横の「未コミット 3」「未push 2」は、そのリポジトリのやり残しです (30 秒ごとに git で見ます。
     上流のブランチが無ければ、どのリモートにも無いコミットを数えます。リモートが無ければ未push は出しません)
   - 押すとその窓へ切り替えます。VS Code の中のどのチャットのタブかまでは、外から選べません
-- **VS Code の窓は自動でタブになります** (欄に出ている窓。ドックを開いたときに開いていたものも、あとから開いたものも)。
-  いま使っている窓だけ選び、ほかは裏のタブにします。「ドックから外す」で外した窓は取り込み直しません。
-  切るときは「設定 ▾」の「VS Code の窓を自動でタブにする」
+- **VS Code の窓を自動でタブにできます** (最初は切れています。「設定 ▾」の「VS Code の窓を自動でタブにする」で入れます)。
+  欄に出ている窓を、ドックを開いたときに開いていたものも、あとから開いたものも取り込みます。
+  いま使っている窓だけ選び、ほかは裏のタブにします。「ドックから外す」で外した窓は取り込み直しません
 - ドックを閉じるときに「ツールも閉じる」を選んでも、VS Code の窓は閉じずに元の窓に戻します (中の Claude の会話ごと閉じないため)
 - ↗ は見る URL です。押すと既定のブラウザで開きます
   - 窓の下: [LPortMan](https://github.com/lancard-aikawa/LPortMan) の台帳 (`~/.lportman/ports.json`) で、そのフォルダか編集したリポジトリに予約したポート
@@ -64,10 +67,14 @@ VS Code で Claude Code を使っているときに、どの窓で何をして�
 - **Claude に URL を足させる・隠させる**: Claude のセッションから次のコマンドを打つと、その窓の下に出ます
   (窓は打った場所のフォルダから決まります)。Claude に使わせるには、`~/.claude/CLAUDE.md` に使い方を書いておきます
   ```
-  uv run --no-project <WinTabDock のフォルダ>/claude_sessions.py link add <URL> --name 本番
-  uv run --no-project <WinTabDock のフォルダ>/claude_sessions.py link hide <URL>     # --all で全部の窓
-  uv run --no-project <WinTabDock のフォルダ>/claude_sessions.py link remove|unhide|list ...
+  <WinTabDock のフォルダ>/WinTabDock.exe --link add <URL> --name 本番
+  <WinTabDock のフォルダ>/WinTabDock.exe --link hide <URL>     # --all で全部の窓
+  <WinTabDock のフォルダ>/WinTabDock.exe --link remove|unhide|list ...
   ```
+  ソースから動かしているなら `uv run --no-project <フォルダ>/claude_sessions.py link ...` でも同じです。
+  PowerShell から exe を呼ぶときは、結果を見るなら `| Out-String` を付けます (付けないと、PowerShell は窓なしのアプリの
+  終わりを待たず、結果も受け取りません。足す・隠すは効きます)。日本語が化けるときは先に
+  `[Console]::OutputEncoding = [Text.Encoding]::UTF8`
   控えは `%LOCALAPPDATA%\WinTabDock\claude_links.json` です
 - 読むのは `~/.claude/ide/*.lock` (開いている窓) と `~/.claude/projects/*/*.jsonl` (会話の記録) だけで、どちらにも書きません。
   単独でも `uv run claude_sessions.py` で同じ一覧を文字で出せます

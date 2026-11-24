@@ -17,7 +17,7 @@
 
 from __future__ import annotations
 
-__version__ = "0.4.4"  # 版を上げるときは CHANGELOG.md も (packaging/build.ps1 -Zip が zip の名前に使う)
+__version__ = "0.5.0"  # 版を上げるときは CHANGELOG.md も (packaging/build.ps1 -Zip が zip の名前に使う)
 
 import ctypes
 import json
@@ -653,7 +653,8 @@ class Dock:
         self.root.bind("<Map>", lambda e: self.on_restore() if e.widget is self.root else None)
         self._layout_pending = False
         self._last_fix: tuple | None = None  # keep_tabs_in_place が最後に直したずれ
-        if self.prefs.get("claude_panel", True):
+        # Claude の欄は、Claude Code の拡張を使っている人 (~/.claude/ide がある) にだけ最初から出す
+        if self.prefs.get("claude_panel", claude_code_present()):
             self.set_claude_panel(True, save=False)
         self.root.after(500, self.poll)
         # 窓が現れたことはフックで受ける (自動取り込みと、遠隔でつないでいる間に開いた窓をタブにするため)。
@@ -1725,7 +1726,8 @@ class Dock:
 
     @property
     def auto_vscode(self) -> bool:
-        return self.prefs.get("auto_vscode", True)
+        # 最初は切っておく (更新した人の VS Code の窓が、開いたとたんにドックに吸い込まれないように)
+        return self.prefs.get("auto_vscode", False)
 
     def set_auto_vscode(self, on: bool) -> None:
         self.prefs["auto_vscode"] = on
@@ -1978,7 +1980,68 @@ def load_config() -> tuple[list[dict], dict]:
     return data.get("tool", []), {k: v for k, v in data.items() if k != "tool"}
 
 
+def claude_code_present() -> bool:
+    import claude_sessions
+    return (claude_sessions.CLAUDE_DIR / "ide").is_dir()
+
+
+def attach_std_streams() -> None:
+    """窓なしの exe (console=False) では sys.stdout / stderr が None。呼んだ側がパイプを渡していれば
+    (Claude の Bash・PowerShell の道具、`| more` など)、その口につなぎ直して結果を返せるようにする"""
+    import msvcrt
+    k32 = ctypes.windll.kernel32
+    k32.GetStdHandle.restype = ctypes.c_void_p
+    for name, num in (("stdout", -11), ("stderr", -12)):
+        if getattr(sys, name) is not None:
+            continue
+        h = k32.GetStdHandle(num)
+        if not h or h == ctypes.c_void_p(-1).value:
+            continue
+        k32.GetFileType.argtypes = [ctypes.c_void_p]
+        if k32.GetFileType(h) not in (1, 3):  # FILE_TYPE_DISK, FILE_TYPE_PIPE
+            continue
+        try:
+            fd = msvcrt.open_osfhandle(h, os.O_WRONLY)
+            setattr(sys, name, open(fd, "w", encoding="utf-8", buffering=1, closefd=False))
+        except OSError:
+            pass
+
+
+def run_link(args: list[str]) -> None:
+    """WinTabDock.exe --link ...: Claude の欄に出す URL を足す・隠す (claude_sessions.py link と同じ)。
+    PowerShell は窓なしのアプリを `& exe` で呼ぶと、出力を受ける口を作るのに終わりを待たず読みもしない。そこに書くと
+    書き終わらずに止まった (2026-11-24。足す・隠すは済んでいた)。結果は先に貯めて、書き出しは 3 秒だけ待つ"""
+    import io
+    import claude_sessions
+    attach_std_streams()
+    real = sys.stdout, sys.stderr
+    bufs = io.StringIO(), io.StringIO()
+    sys.stdout, sys.stderr = bufs
+    try:
+        code = claude_sessions.link_main(args, prog="WinTabDock.exe --link")
+    except SystemExit as e:  # argparse の --help と使い方の誤り
+        code = e.code if isinstance(e.code, int) else 2
+    sys.stdout, sys.stderr = real
+
+    def emit() -> None:
+        for f, b in zip(real, bufs):
+            if f and b.getvalue():
+                try:
+                    f.reconfigure(encoding="utf-8")
+                except (AttributeError, ValueError):
+                    pass
+                f.write(b.getvalue())
+                f.flush()
+    t = threading.Thread(target=emit, daemon=True)
+    t.start()
+    t.join(3)
+    os._exit(code)
+
+
 def main() -> None:
+    if sys.argv[1:2] == ["--link"]:
+        # Claude の欄に出す URL を足す・隠す (claude_sessions.py link と同じ。exe で使う人は .py を持っていない)
+        run_link(sys.argv[2:])
     if sys.stdout:  # 窓なしの exe では sys.stdout が None (ここで落ちて exe が起動しなかった)
         sys.stdout.reconfigure(encoding="utf-8")
     ctypes.windll.shcore.SetProcessDpiAwareness(2)  # 座標を物理ピクセルでそろえる (相手の窓と合わせるため)
@@ -2004,6 +2067,11 @@ def main() -> None:
         # 前の試験が残した前回のタブ・設定 (大きさ・位置など) に左右されないように
         session_path.unlink(missing_ok=True)
         prefs_path.unlink(missing_ok=True)
+    if not prefs_path.exists():
+        # Claude の欄は出さない (左に 290px 取るので、ドックを 900px に縮める試験で、最小の幅のあるツールが本体に収まらない。
+        # VS Code の窓も試験のドックに取り込ませない。欄は check_claude_panel.py で確かめる)
+        prefs_path.parent.mkdir(parents=True, exist_ok=True)
+        prefs_path.write_text(json.dumps({"claude_panel": False, "auto_vscode": False}), encoding="utf-8")
     settings = {**settings, "auto_adopt": True, "restore_session": mode in ("session-restore", "startup-check")}
     dock = Dock(tools, settings, session_path=session_path, prefs_path=prefs_path)
     run(dock, args)

@@ -103,6 +103,18 @@ def check(name, ok):
     print(("PASS " if ok else "FAIL ") + name)
 
 
+# 最初の設定: 自動取り込みは切れている。欄は Claude Code の印 (~/.claude/ide) があるときだけ出す
+check("自動取り込みは最初は切れている", w.Dock.auto_vscode.fget(type("P", (), {"prefs": {}})()) is False)
+_real_dir = cs.CLAUDE_DIR
+cs.CLAUDE_DIR = SP / "noclaude"
+check("Claude Code の印が無ければ、欄を最初は出さない", w.claude_code_present() is False)
+cs.CLAUDE_DIR = fake
+check("Claude Code の印があれば、欄を最初から出す", w.claude_code_present() is True)
+cs.CLAUDE_DIR = _real_dir
+
+
+# 自動取り込みは最初は切れている。入れた人の設定で始める
+(SP / "home" / "p.json").write_text(json.dumps({"auto_vscode": True}), encoding="utf-8")
 d = w.Dock([], {"auto_adopt": False, "restore_session": False},
            session_path=SP / "home" / "s.json", prefs_path=SP / "home" / "p.json")
 d.root.geometry("1000x700+60+60")

@@ -15,6 +15,10 @@ uv run demo/shoot.py            # README の画面 (架空のデモアプリを�
 - 設定は exe の隣の `wintabdock.toml`。ビルド時に無ければ見本を置く (あれば上書きしない)
 - 「設定」の「ログイン時に起動する」で、HKCU の Run に exe の場所を登録する。exe を移動したら入れ直す
 - 窓なしの exe では `sys.stdout` が `None`。`sys.stdout.reconfigure()` をそのまま呼ぶと起動しなかった
+- `WinTabDock.exe --link ...` (`run_link`): bash から呼ぶと結果も終わりの番号も返る。PowerShell から `& exe` で呼ぶと、
+  窓なしのアプリの終わりを待たないのに出力を受けるパイプは作り、読みに来ないので、書き出しで止まって exe が残り続けた
+  (足す・隠すは済んでいた)。結果は StringIO に貯め、書き出しは別のスレッドで 3 秒だけ待って `os._exit` する。
+  `| Out-String` を付ければ PowerShell も待って受け取る (文字は UTF-8 で出すので、PowerShell の OutputEncoding を UTF-8 に)
 - アイコンの元は `assets/icon.svg` (48px 以上) と `assets/icon-small.svg` (32px 以下)。`uv run tools/make-icon.py` で ICO を作り直す
 - exe の確かめ方: `uv run check_exe.py`。exe を一時フォルダにコピーし、PortWho と RepoTether だけの設定と
   `WINTABDOCK_HOME` (控えと前回のタブの置き場所) を一時フォルダに向けて動かす。人の前回のタブや他のツールには触れない

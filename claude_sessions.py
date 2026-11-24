@@ -539,9 +539,9 @@ def window_for(cwd: str, wins: list[Window]) -> str | None:
     return best[1] if best else None
 
 
-def link_main(argv: list[str]) -> int:
+def link_main(argv: list[str], prog: str = "claude_sessions.py link") -> int:
     import argparse
-    p = argparse.ArgumentParser(prog="claude_sessions.py link",
+    p = argparse.ArgumentParser(prog=prog,
                                 description="WinTabDock の Claude の欄に出す URL を足す・隠す")
     p.add_argument("op", choices=["add", "remove", "hide", "unhide", "list"])
     p.add_argument("url", nargs="?")
