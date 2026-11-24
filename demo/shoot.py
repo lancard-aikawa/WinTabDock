@@ -50,6 +50,8 @@ APPS = {
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp())
+    # Claude の欄は出さない (人の会話の一覧が写る。欄の画面は demo/shoot_claude.py が架空のデータで撮る)
+    (tmp / "p.json").write_text('{"claude_panel": false, "auto_vscode": false}', encoding="utf-8")
     dock = td.Dock([], {"auto_adopt": False, "restore_session": False}, session_path=tmp / "s.json",
                    prefs_path=tmp / "p.json")
     dock.root.geometry("820x520+120+120")

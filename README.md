@@ -38,6 +38,9 @@ exe = "C:/Tools/MyTool/MyTool.exe"
 ## Claude の欄 (左)
 
 VS Code で Claude Code を使っているときに、どの窓で何をしているかを一望する欄です。帯の「◧ Claude」で出す・しまう。
+
+![Claude の欄。VS Code の窓ごとにセッションの状態・やり残し・見る URL が並ぶ (架空のデータ)](docs/images/claude-panel.png)
+
 Claude Code の拡張を使っている (`~/.claude/ide` がある) ときだけ、最初から出ています。
 欄は左に幅 290px を取るので、そのぶんツールを置く場所が狭くなります。ドックを狭くすると、最小の幅のあるツールは
 置く場所に収まらず、右にはみ出します。そのときはドックを広げるか、「◧ Claude」で欄をしまいます。

@@ -9,7 +9,8 @@ uv run wintabdock.py              # wintabdock.toml のツールを並べたド�
 uv run wintabdock.py --rescue     # ドックが落ちて隠れたままの窓を元に戻す
 pwsh packaging/build.ps1        # dist/WinTabDock/ に WinTabDock.exe (窓なし) と _internal/ を作る (exe の隣の wintabdock.toml は残す)
 pwsh packaging/build.ps1 -Zip   # 配布用の dist/WinTabDock-<版>-win-x64.zip も作る (設定は見本を入れる)
-uv run demo/shoot.py            # README の画面 (架空のデモアプリを取り込んだドック) を撮り直す
+uv run demo/shoot.py            # README の画面 (架空のデモアプリを取り込んだドック) を撮り直す。Claude の欄は出さない
+uv run demo/shoot_claude.py     # README の Claude の欄の画面。ホーム・控え・一時フォルダを架空のものに向けて撮る (人の会話は写らない)
 ```
 
 - 設定は exe の隣の `wintabdock.toml`。ビルド時に無ければ見本を置く (あれば上書きしない)
