@@ -51,14 +51,47 @@ def session_with(lines, age):
 
 
 TOOL = {"type": "assistant", "message": {"stop_reason": "tool_use", "content": [
-    {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}]}}
-RESULT = {"type": "user", "message": {"content": [{"type": "tool_result", "content": "ok"}]}}
+    {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]}}
+RESULT = {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}}
 END = {"type": "assistant", "message": {"stop_reason": "end_turn", "content": [{"type": "text", "text": "done"}]}}
 check("道具を呼んだまま 40 秒 = 許可待ちかも", session_with([TOOL], 40) == "asking")
 check("道具を呼んだまま 20 秒 = まだ知らせない (考え中か中断)", session_with([TOOL], 20) == "stalled")
 check("結果を返したあと止まっている = 考え中か中断", session_with([TOOL, RESULT], 40) == "stalled")
 check("返事を終えた = 返事待ち", session_with([TOOL, RESULT, END], 40) == "waiting")
 check("いま書いている = 動作中", session_with([TOOL], 1) == "busy")
+
+# ── 何を待っているか ──
+check("Bash はコマンドの 1 行目", cs.describe_tool("Bash", {"command": "npm test\nsecond"})[0] == "Bash: npm test")
+check("Edit はファイルの名前だけ", cs.describe_tool("Edit", {"file_path": r"C:\a\b\wintabdock.py"})[0]
+      == "Edit: wintabdock.py")
+check("MCP の道具は道具の名前だけ", cs.describe_tool("mcp__playwright__browser_click", {})[0] == "browser_click")
+check("長いコマンドは切る", len(cs.describe_tool("Bash", {"command": "x" * 200})[0]) <= 56)
+
+
+def pending_after(lines):
+    f = SP / "pending.jsonl"
+    f.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+    s = cs.Session(id="p", path=f)
+    cs.Scanner()._read(s, f.stat().st_size, time.time() - 40, time.time())
+    return s.waiting_on()[0]
+
+
+def call(i, cmd):
+    return {"type": "assistant", "message": {"stop_reason": "tool_use", "content": [
+        {"type": "tool_use", "id": i, "name": "Bash", "input": {"command": cmd}}]}}
+
+
+def result(i):
+    return {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": i, "content": "ok"}]}}
+
+
+check("結果の返っていない道具を出す", pending_after([call("a", "ls")]) == "Bash: ls")
+check("結果が返ったものは出さない", pending_after([call("a", "ls"), result("a"), call("b", "pwd")]) == "Bash: pwd")
+check("並べて呼んだときは最後のもの + ほかの数", pending_after([call("a", "ls"), call("b", "pwd")]) == "Bash: pwd  ほか 1")
+check("並べて呼んだ片方だけ返った", pending_after([call("a", "ls"), call("b", "pwd"), result("b")]) == "Bash: ls")
+check("返事を終えたら消える", pending_after([call("a", "ls"), END]) == "")
+check("人が書き直したら消える (中断)", pending_after([call("a", "ls"), {"type": "user", "message": {"content": "やめて"}}])
+      == "")
 
 # ── git のやり残し ──
 repo = SP / "wtdnotice"
@@ -190,6 +223,16 @@ wait_for(lambda: panel._prev.get((str(repo), "live")) == "busy", 6)
 os.utime(live, (time.time() - 40, time.time() - 40))
 check("動いたあと許可待ちかもになっても知らせる", wait_for(lambda: (str(repo), "live") in panel.attention), panel._prev)
 check("知らせるたびにタスクバーを光らせる (2 回目)", dock.flashes == 2, dock.flashes)
+
+
+def tool_text():
+    got = panel._tool_labels.get((str(repo), "live"))
+    return got[0].cget("text") if got and got[0].winfo_manager() else ""
+
+
+check("許可待ちかもの行に、待っている道具が出る", wait_for(lambda: tool_text() == "▸ Bash: ls"), tool_text())
+live.write_text(live.read_text(encoding="utf-8") + json.dumps(RESULT) + "\n", encoding="utf-8")
+check("結果が返って動き出したら消える", wait_for(lambda: tool_text() == ""), tool_text())
 
 # looking_at の本物: ドックの選んでいるタブが前面でなければ見ていない (前面は試験を動かしている端末)
 panel.looking_at = real_looking

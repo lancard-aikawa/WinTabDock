@@ -58,6 +58,9 @@ uv run demo/shoot.py            # README の画面 (架空のデモアプリを�
   記録は数 MB になるので、ファイルごとに読んだ位置を覚えて増えた分だけ読む (最初の 1 回は全部で数秒かかる。別のスレッドで回す)
 - 状態: 記録が 15 秒以内に増えた = 動作中、最後の返事が道具を呼ばずに終わった = 返事待ち、道具を呼んだまま結果が 30 秒返らない
   = 許可待ちかも (許可を待っている間は記録が増えないので、長いコマンドと見分けられない)、それ以外 = 考え中か中断
+- 待っている道具 (`Session.pending`): 呼び出し (`tool_use` の `id`) を足し、結果 (`tool_result` の `tool_use_id`) で消す。
+  返事を終えたとき・人が書いたとき (中断を含む) は全部消す。並べて呼んだときは最後のもの + ほかの数。
+  欄に出すのは許可待ちかも・考え中のときだけ (動作中は道具が次々変わる。札は書き換えるだけで欄を作り直さない)
 - 知らせ (`ClaudePanel.update_attention`、0.5 秒ごと): 前に見た状態が返事待ち・許可待ちかも以外で、今そうなったセッションを
   知らせる。最初の一覧 (前の状態が無い) では知らせない。見ている = ドックでその窓のタブを選んでいて、ドックかその窓が前面
   (外した窓なら、その窓が前面)。見たら消す。ドックへは `set_attention` で窓の番号を渡し、`style_tab` が
@@ -100,7 +103,7 @@ uv run check_session.py PortWho RepoTether       # 前回のタブ: 起動中な
 uv run check_startup.py PortWho RepoTether       # 起動時に開く: 選び方ごとに開くもの・起動するものが変わるか
 uv run check_claude_panel.py                     # Claude の欄: VS Code の窓の自動取り込み (VS Code に似せた窓で。人の VS Code には触らない。人の画面に出ない別のデスクトップで流す。13 項目)
 uv run check_claude_links.py                     # Claude の欄: URL を足す・隠す (link のコマンドと右クリック。画面に何も出さない)
-uv run check_claude_notice.py                    # Claude の欄: 返事待ちの知らせと git のやり残し (画面に何も出さない。24 項目)
+uv run check_claude_notice.py                    # Claude の欄: 返事待ちの知らせ・待っている道具・git のやり残し (画面に何も出さない。36 項目)
 uv run check_taskbar.py PortWho RepoTether       # ドックを閉じたあと、ツールがタスクバーに戻るか (UI Automation で見る)
 uv run check_close.py PortWho RepoTether         # × を押したとき: 一緒に閉じる / 残す / たずねる / × を無視するアプリ
 ```

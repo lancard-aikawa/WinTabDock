@@ -113,6 +113,7 @@ class ClaudePanel:
         self._win_buttons = {}
         self._state_labels = {}
         self._title_buttons: dict[tuple[str, str], tk.Button] = {}
+        self._tool_labels = {}
         self._prev: dict[tuple[str, str], str] = {}  # (窓, セッション) → 前に見た状態
         self.attention: set[tuple[str, str]] = set()  # 知らせているセッション。その窓を見たら消す
         self._results: queue.SimpleQueue = queue.SimpleQueue()
@@ -253,6 +254,7 @@ class ClaudePanel:
             self._win_buttons: dict[str, tk.Button] = {}
             self._state_labels: dict[tuple[str, str], tuple[tk.Label, tk.Label]] = {}
             self._title_buttons = {}
+            self._tool_labels: dict[tuple[str, str], tuple[tk.Label, Tooltip, tk.Frame]] = {}
             self._attn_drawn = None
             for c in self.inner.winfo_children():
                 c.destroy()
@@ -286,6 +288,7 @@ class ClaudePanel:
                     labels[0].configure(text=mark, fg=color)
                 if labels[1].cget("text") != text:
                     labels[1].configure(text=text)
+                self._show_tool(w.folder, x)
 
     def _window_card(self, w: cs.Window, sessions: list[cs.Session]) -> None:
         card = tk.Frame(self.inner, bg=CARD_BG)
@@ -308,6 +311,24 @@ class ClaudePanel:
         for x in sessions:
             self._session_row(card, w, x)
 
+    def _show_tool(self, folder: str, x: cs.Session) -> None:
+        """動作中でなく、道具の結果を待っているときだけ、状態の札の下に「▸ Bash: npm test」を出す
+        (動作中は道具が次々変わるので出さない。書き換えるだけで、欄は作り直さない)"""
+        got = self._tool_labels.get((folder, x.id))
+        if not got:
+            return
+        label, tip, state = got
+        short, full = x.waiting_on() if x.state in ("asking", "stalled") else ("", "")
+        text = f"▸ {short}" if short else ""
+        if label.cget("text") == text:
+            return
+        label.configure(text=text)
+        tip.text = full
+        if text and not label.winfo_manager():
+            label.pack(fill=tk.X, padx=(6, 0), after=state)
+        elif not text:
+            label.pack_forget()
+
     def _win_color(self, folder: str, hover: bool = False) -> str:
         if folder == self._active:
             return WIN_ACTIVE
@@ -325,6 +346,11 @@ class ClaudePanel:
         text = tk.Label(state, text="", bg=CARD_BG, fg=FG_DIM, font=self.font_small)
         text.pack(side=tk.LEFT)
         self._state_labels[(w.folder, s.id)] = (mark, text)
+        # 結果を待っている道具 (許可待ちかもの中身)。押せない札。出すかどうかと文字は render が書き換える
+        tool = tk.Label(row, text="", bg=CARD_BG, fg=STATE_STYLE["asking"][1], font=self.font_small, anchor=tk.W,
+                        justify=tk.LEFT, wraplength=PANEL_W - 50)
+        tool_tip = Tooltip(tool, "")
+        self._tool_labels[(w.folder, s.id)] = (tool, tool_tip, state)
         title = s.title or s.last_prompt[:40] or s.id[:8]
         b = tk.Button(row, text=title, anchor=tk.W, justify=tk.LEFT, wraplength=PANEL_W - 50, bg=ROW_BG, fg=FG,
                       activebackground=ROW_HOVER, activeforeground=FG, relief=tk.FLAT, bd=0, padx=6, pady=2,

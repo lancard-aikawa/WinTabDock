@@ -97,6 +97,27 @@ def is_view_url(url: str) -> bool:
     return host in LOCAL_HOSTS or host.endswith(DEPLOY_SUFFIXES)
 
 
+def describe_tool(name: str, args: dict) -> tuple[str, str]:
+    """道具の呼び出し → (欄に出す短い説明, 吹き出しに出す長い説明)。例: ("Bash: npm test", "Bash\nnpm test --watch=false")"""
+    args = args if isinstance(args, dict) else {}
+    short_name = name.split("__")[-1] if name.startswith("mcp__") else name  # mcp__サーバ__道具 は道具の名前だけ
+    detail = ""
+    for key in ("command", "file_path", "notebook_path", "url", "query", "pattern", "description", "prompt", "skill"):
+        v = args.get(key)
+        if isinstance(v, str) and v.strip():
+            detail = v.strip()
+            break
+    if not detail:
+        return short_name, name
+    if name in ("Edit", "Write", "Read", "MultiEdit", "NotebookEdit"):
+        brief = Path(detail).name  # パスは名前だけ (欄が狭い)
+    else:
+        brief = detail.splitlines()[0]
+        if len(brief) > 48:
+            brief = brief[:47] + "…"
+    return f"{short_name}: {brief}", f"{name}\n{detail[:400]}"
+
+
 def norm_url(url: str) -> str:
     """http://localhost:5173/ と http://localhost:5173 を同じものにする (末尾の / だけのパスを落とす)"""
     return re.sub(r"^(https?://[^/?#]+)/$", r"\1", url.strip())
@@ -121,11 +142,25 @@ class Session:
     urls: list[str] = field(default_factory=list)  # 新しい順
     _offset: int = 0
     _size: int = -1
+    # 結果がまだ返っていない道具の呼び出し: id → (短い説明, 長い説明)。許可を待っているのはこの中のどれか
+    pending: dict[str, tuple[str, str]] = field(default_factory=dict)
     # 最後の会話の行: "end" (返事を終えた) / "tool_use" (道具を呼んだ) / "tool_result" (結果を返した) / "user"
     _last_kind: str = ""
 
+    def waiting_on(self) -> tuple[str, str]:
+        """結果を待っている道具 (短い説明, 長い説明)。無ければ ("", "")。並べて呼んだときは最後のもの + ほかの数"""
+        if not self.pending:
+            return "", ""
+        items = list(self.pending.values())
+        short, full = items[-1]
+        if len(items) > 1:
+            short += f"  ほか {len(items) - 1}"
+            full = "\n".join(f for _, f in items)
+        return short, full
+
     def to_json(self) -> dict:
         return {"id": self.id, "title": self.title, "last_prompt": self.last_prompt, "cwd": self.cwd,
+                "waiting_on": self.waiting_on()[0],
                 "branch": self.branch, "updated": self.updated, "state": self.state,
                 "edited": sorted(self.edited, key=lambda k: -self.edited[k]), "urls": self.urls}
 
@@ -426,20 +461,28 @@ class Scanner:
                 bt = b.get("type")
                 if t == "assistant" and bt == "text":
                     self._urls(s, b.get("text") or "")
-                elif t == "assistant" and bt == "tool_use" and b.get("name") in EDIT_TOOLS:
-                    fp = (b.get("input") or {}).get("file_path") or (b.get("input") or {}).get("notebook_path")
-                    root = edited_repo(fp) if fp else None
-                    if root:
-                        s.edited[root] = when
+                elif t == "assistant" and bt == "tool_use":
+                    if b.get("id"):
+                        s.pending[b["id"]] = describe_tool(b.get("name") or "?", b.get("input") or {})
+                    if b.get("name") in EDIT_TOOLS:
+                        fp = (b.get("input") or {}).get("file_path") or (b.get("input") or {}).get("notebook_path")
+                        root = edited_repo(fp) if fp else None
+                        if root:
+                            s.edited[root] = when
+                elif t == "user" and bt == "tool_result":
+                    s.pending.pop(b.get("tool_use_id") or "", None)
             if t == "assistant":
                 kinds = {b.get("type") for b in blocks if isinstance(b, dict)}
                 if "tool_use" in kinds:
                     s._last_kind = "tool_use"
                 elif msg.get("stop_reason") == "end_turn" or ("text" in kinds and msg.get("stop_reason") != "tool_use"):
                     s._last_kind = "end"
+                    s.pending.clear()  # 返事を終えた (中断で結果の返らなかった呼び出しも、もう待っていない)
             else:
                 s._last_kind = "tool_result" if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in blocks) \
                     else "user"
+                if s._last_kind == "user":
+                    s.pending.clear()  # 人が新しく書いた (中断して書き直した、を含む)
 
     @staticmethod
     def _urls(s: Session, text: str) -> None:
@@ -557,6 +600,8 @@ def main() -> None:
         for s in w.sessions:
             print(f"  ● {s.title or s.last_prompt[:30]}  [{STATE_LABEL[s.state]} {ago(now - s.updated)}]"
                   f"{'  ' + s.branch if s.branch else ''}")
+            if s.state in ("asking", "stalled") and s.pending:
+                print(f"      待っている道具: {s.waiting_on()[0]}")
             others = [r for r in s.edited if not same_path(r, w.folder)]
             for r in others:
                 g = w.git.get(r)
