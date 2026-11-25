@@ -9,6 +9,9 @@
 人の会話の記録やリポジトリが写らないよう、ホーム (USERPROFILE)・控え (WINTABDOCK_HOME)・一時フォルダを全部
 一時フォルダの中の架空のものに向けてから読み込む。git のリポジトリも一時フォルダに作る。
 画像は docs/images/claude-panel.png。撮る間の数秒だけ、撮影用のドックが画面に出る。
+画面は写さず、ドックと取り込んだ窓をそれぞれ PrintWindow で描かせて重ねる (人の窓が上にあっても写らない)。
+CPU の行を見せるため、架空の ~/.claude/sessions に claude.exe の代わりのプロセスを書き、node を 2 つ回させる。
+欄の見出しの「CPU nn%」は、撮った PC の本当の値。
 """
 
 import json
@@ -36,7 +39,6 @@ os.environ["TEMP"] = os.environ["TMP"] = str(TMP / "tmp")  # 「編集」に出�
 sys.path.insert(0, str(ROOT))
 import claude_sessions as cs  # noqa: E402
 import wintabdock as td  # noqa: E402
-from PIL import ImageGrab  # noqa: E402
 
 td.ctypes.windll.shcore.SetProcessDpiAwareness(2)
 NOW = time.time()
@@ -120,6 +122,55 @@ session(notes, "s4", "画像の圧縮ツールを比べて試作する", "",
          {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "w1", "content": "ok"}]}},
          say("試作を image-tools に置きました。http://127.0.0.1:18080 で比べられます")], 3 * 3600)
 
+import proc_cpu  # noqa: E402  (USERPROFILE を架空のホームに向けた後で読む。セッションの対応も架空の ~/.claude/sessions を見る)
+
+# 「注文 API に在庫の確認を足す」(s3) が npm test を走らせている、を見せる: claude.exe の代わりのプロセスが node を 2 つ回す
+BURN = shutil.which("node")
+STAND_IN = ("import subprocess, sys, time; "
+            f"cmd = {[BURN, '-e', 'for(;;){}'] if BURN else [sys.executable, '-c', 'while 1: pass']!r}; "
+            "ps = [subprocess.Popen(cmd, creationflags=0x08000000) for _ in range(2)]; time.sleep(120)")
+
+
+def window_image(hwnd, visible):
+    """窓を PrintWindow で描かせた画像 (ほかの窓が上に重なっていても、その窓だけ写る)。visible: 写す範囲 (画面の座標)"""
+    from PIL import Image
+    c = td.ctypes
+    u, g = c.windll.user32, c.windll.gdi32
+    for f, res, args in ((u.GetWindowDC, c.c_void_p, [c.c_void_p]), (g.CreateCompatibleDC, c.c_void_p, [c.c_void_p]),
+                         (g.CreateCompatibleBitmap, c.c_void_p, [c.c_void_p, c.c_int, c.c_int]),
+                         (g.SelectObject, c.c_void_p, [c.c_void_p, c.c_void_p]),
+                         (u.PrintWindow, c.c_int, [c.c_void_p, c.c_void_p, c.c_uint]),
+                         (g.GetDIBits, c.c_int, [c.c_void_p, c.c_void_p, c.c_uint, c.c_uint, c.c_void_p, c.c_void_p, c.c_uint]),
+                         (g.DeleteObject, c.c_int, [c.c_void_p]), (g.DeleteDC, c.c_int, [c.c_void_p]),
+                         (u.ReleaseDC, c.c_int, [c.c_void_p, c.c_void_p])):
+        f.restype, f.argtypes = res, args
+    wr = td.wintypes.RECT()
+    u.GetWindowRect(td.wintypes.HWND(hwnd), c.byref(wr))
+    w, h = wr.right - wr.left, wr.bottom - wr.top
+    wdc = u.GetWindowDC(hwnd)
+    mdc = g.CreateCompatibleDC(wdc)
+    bmp = g.CreateCompatibleBitmap(wdc, w, h)
+    g.SelectObject(mdc, bmp)
+    u.PrintWindow(hwnd, mdc, 2)  # PW_RENDERFULLCONTENT
+    hdr = (c.c_uint32 * 10)(40, w, (-h) & 0xFFFFFFFF, 1 | (32 << 16), 0, 0, 0, 0, 0, 0)  # BITMAPINFOHEADER (上から下)
+    buf = c.create_string_buffer(w * h * 4)
+    g.GetDIBits(mdc, bmp, 0, h, buf, hdr, 0)
+    g.DeleteObject(bmp)
+    g.DeleteDC(mdc)
+    u.ReleaseDC(hwnd, wdc)
+    img = Image.frombuffer("RGBA", (w, h), buf.raw, "raw", "BGRA", 0, 1).convert("RGB")
+    return img.crop((visible.left - wr.left, visible.top - wr.top, visible.right - wr.left, visible.bottom - wr.top))
+
+
+def start_stand_in():
+    p = subprocess.Popen([sys.executable, "-c", STAND_IN], creationflags=0x08000000)
+    started = next(x[3] for x in proc_cpu.processes() if x[0] == p.pid)
+    (HOME / ".claude" / "sessions").mkdir(exist_ok=True)
+    (HOME / ".claude" / "sessions" / f"{p.pid}.json").write_text(
+        json.dumps({"pid": p.pid, "sessionId": "s3", "procStart": str(started)}), encoding="utf-8")
+    return p
+
+
 COMMON = "import ctypes, tkinter as t; ctypes.windll.shcore.SetProcessDpiAwareness(2); r=t.Tk(); r.configure(bg='#f7f7f5'); "
 APP = COMMON + (
     "r.title('メモ'); x=t.Text(r, font=('Yu Gothic UI', 11), bd=0, padx=14, pady=12); x.pack(fill='both', expand=True); "
@@ -137,6 +188,14 @@ def main() -> None:
     proc = subprocess.Popen([sys.executable, "-c", APP], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL)
     panel = dock.claude_panel
+    stand_in = start_stand_in()
+    busy = HOME / ".claude" / "projects" / cs.project_slug(str(shop)) / "s2.jsonl"
+
+    def keep_busy():
+        # 「商品ページ…」(s2) を動作中に見せ続ける (CPU の行が出るまで待つと、書いてから 15 秒を過ぎて動作中でなくなる)
+        os.utime(busy, None)
+        dock.root.after(2000, keep_busy)
+    keep_busy()
 
     def adopt():
         hwnd = None
@@ -161,7 +220,8 @@ def main() -> None:
                     pass
                 walk(c)
         walk(panel.inner)
-        ready = any("未push" in str(t) for t in labels) and len(panel.windows) == 3
+        ready = (any("未push" in str(t) for t in labels) and any("⚙ CPU" in str(t) for t in labels)
+                 and len(panel.windows) == 3)
         if not ready and tries[0] < 40:
             dock.root.after(250, wait_ready)
             return
@@ -170,11 +230,19 @@ def main() -> None:
         dock.root.after(800, shoot)
 
     def shoot():
+        # 画面を写さず、ドックとメモの窓をそれぞれ描かせて重ねる。画面を写すと、人の窓が上に重なっていればそれが写る
+        # (2026-11-25、エクスプローラーと人のメモアプリの中身が写った)
         r = td.wintypes.RECT()
         ctypes = td.ctypes
         ctypes.windll.dwmapi.DwmGetWindowAttribute(td.wintypes.HWND(dock.hwnd), 9, ctypes.byref(r), ctypes.sizeof(r))
+        img = window_image(dock.hwnd, r)
+        for t in dock.tabs:
+            if ctypes.windll.user32.IsWindowVisible(t.hwnd):
+                tr = td.wintypes.RECT()
+                ctypes.windll.user32.GetWindowRect(t.hwnd, ctypes.byref(tr))
+                img.paste(window_image(t.hwnd, tr), (tr.left - r.left, tr.top - r.top))
         out = OUT / "claude-panel.png"
-        ImageGrab.grab(bbox=(r.left, r.top, r.right, r.bottom), all_screens=True).save(out)
+        img.save(out)
         print(out)
         for t in list(dock.tabs):
             dock.close_tab(t)
@@ -185,6 +253,8 @@ def main() -> None:
         dock.quit()
         if proc.poll() is None:
             proc.kill()
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(stand_in.pid)], capture_output=True,
+                       creationflags=0x08000000)  # 代わりのプロセスと、回している node
         shutil.rmtree(TMP, ignore_errors=True)
 
     dock.root.after(500, adopt)
