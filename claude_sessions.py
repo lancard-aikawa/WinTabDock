@@ -46,6 +46,12 @@ MAX_SESSIONS_PER_WINDOW = 6
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 URL_RE = re.compile(r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'*+,;=%]+")
 URL_TRAIL = ".,;:)]}>'\"`"
+# 道具の結果だけの行の頭: {"parentUuid":..,"isSidechain":false,..,"type":"user","message":{"role":"user","content":[{"tool_use_id"..
+# (結果のブロックで始まる content)。人が書いた行は content が文字列か text のブロックで始まるので当たらない
+TOOL_RESULT_HEAD = re.compile(
+    rb'^\{"parentUuid":(?:null|"[^"]*"),"isSidechain":(true|false),[^{]*?"type":"user","message":\{"role":"user",'
+    rb'"content":\[\{"(?:tool_use_id|type)":"(?:toolu_|tool_result)')
+TOOL_USE_ID = re.compile(rb'"tool_use_id":"([A-Za-z0-9_\-]+)"')
 # 「見る URL」として残すもの: 手元の開発サーバと、自分で出す先。会話に出た記事や資料の URL は出さない
 LOCAL_HOSTS = ("localhost", "127.0.0.1", "0.0.0.0", "[::1]")
 DEPLOY_SUFFIXES = (".workers.dev", ".pages.dev", ".web.app", ".firebaseapp.com", ".netlify.app",
@@ -410,17 +416,18 @@ class Scanner:
         if size < s._size:  # 書き直された (まずない)。最初から
             s.__init__(id=s.id, path=s.path)
         if size != s._size:
+            # 1 行ずつ読む (記録は 1 つで数百 MB になる。丸ごと読むと、起動直後にその分のメモリを使った)
             try:
-                with open(s.path, "rb") as fh:
+                with open(s.path, "rb", buffering=1 << 20) as fh:  # 既定の 8KB の倍近く速い (616 MB で 7.1 → 3.4 秒)
                     fh.seek(s._offset)
-                    chunk = fh.read(size - s._offset)
+                    while s._offset < size:
+                        line = fh.readline(size - s._offset)
+                        if not line.endswith(b"\n"):
+                            break  # 書きかけの最後の行は次に回す
+                        self._line(s, line)
+                        s._offset += len(line)
             except OSError:
                 return
-            end = chunk.rfind(b"\n")
-            if end >= 0:  # 書きかけの最後の行は次に回す
-                for line in chunk[:end].split(b"\n"):
-                    self._line(s, line)
-                s._offset += end + 1
             s._size = size
         s.updated = mtime
         if now - mtime < BUSY_SECONDS:
@@ -435,6 +442,20 @@ class Scanner:
     def _line(self, s: Session, raw: bytes) -> None:
         if not raw.strip():
             return
+        # JSON を読む前に、要らない行を先頭の形で外す。記録の 6 割強は道具の結果 (ファイルの中身・コマンドの出力)、
+        # 2 割強は api-request 系で、全部を json.loads すると 3 日分 (手元で 811 MB) で 40 秒かかった (2026-11-25)
+        if raw.startswith(b'{"type":"'):  # 種類が先頭にある行 (会話の行ではない)
+            if not raw.startswith((b'{"type":"ai-title"', b'{"type":"last-prompt"')):
+                return
+        else:
+            m = TOOL_RESULT_HEAD.search(raw, 0, 1024)
+            if m:  # 道具の結果だけの行: どの呼び出しの結果か (id) だけ見る
+                if m.group(1) == b"true":
+                    return  # サブエージェントの中の会話
+                for i in TOOL_USE_ID.findall(raw):
+                    s.pending.pop(i.decode("ascii", "replace"), None)
+                s._last_kind = "tool_result"
+                return
         try:
             d = json.loads(raw)
         except ValueError:
@@ -454,7 +475,6 @@ class Scanner:
             msg = d.get("message") or {}
             content = msg.get("content")
             blocks = content if isinstance(content, list) else [{"type": "text", "text": content or ""}]
-            when = _iso_to_epoch(d.get("timestamp", ""))
             for b in blocks:
                 if not isinstance(b, dict):
                     continue
@@ -468,7 +488,7 @@ class Scanner:
                         fp = (b.get("input") or {}).get("file_path") or (b.get("input") or {}).get("notebook_path")
                         root = edited_repo(fp) if fp else None
                         if root:
-                            s.edited[root] = when
+                            s.edited[root] = _iso_to_epoch(d.get("timestamp", ""))
                 elif t == "user" and bt == "tool_result":
                     s.pending.pop(b.get("tool_use_id") or "", None)
             if t == "assistant":

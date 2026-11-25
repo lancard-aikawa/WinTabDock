@@ -20,6 +20,7 @@ import webbrowser
 from typing import TYPE_CHECKING, Callable
 
 import claude_sessions as cs
+import proc_cpu
 
 if TYPE_CHECKING:
     from wintabdock import Dock
@@ -43,6 +44,9 @@ STATE_STYLE = {  # 押せない札: 色の点と文字だけ (塗りも枠も付
     "stalled": ("◌", "#9a9ab8", "考え中か中断"),
 }
 WANTS_YOU = ("waiting", "asking")  # この状態に変わったら知らせる
+# CPU (PC 全体を 100%)。セッションの行には CPU_SHOW 以上のときだけ出し、CPU_HEAVY 以上は赤くする (16 コアで約 4 コア分)
+CPU_SHOW, CPU_HEAVY = 3.0, 25.0
+CPU_FG, CPU_HEAVY_FG = "#67e8f9", "#f87171"
 
 
 def vscode_title_matches(title: str, name: str) -> bool:
@@ -95,6 +99,12 @@ class ClaudePanel:
         tk.Label(head, text="Claude", bg=BG, fg=FG, font=self.font_bold).pack(side=tk.LEFT)  # 見出し (押せない)
         self.status = tk.Label(head, text="読み込み中…", bg=BG, fg=FG_DIM, font=self.font_small)
         self.status.pack(side=tk.RIGHT)
+        # PC 全体の CPU (押せない札)。乗せると重いものの上位 (Claude の外も) を出す
+        self.cpu_label = tk.Label(head, text="", bg=BG, fg=FG_DIM, font=self.font_small)
+        self.cpu_label.pack(side=tk.RIGHT, padx=(0, 6))
+        self.cpu_tip = Tooltip(self.cpu_label, "")
+        self.sampler = proc_cpu.CpuSampler()
+        self.cpu = proc_cpu.Snapshot()
         # 中身は縦に長くなるので、Canvas に載せて巻き取れるようにする
         self.canvas = tk.Canvas(self.frame, bg=BG, highlightthickness=0, bd=0)
         self.scroll = tk.Scrollbar(self.frame, orient=tk.VERTICAL, command=self.canvas.yview)
@@ -107,13 +117,18 @@ class ClaudePanel:
         self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._inner_id, width=e.width))
         self.frame.bind_all("<MouseWheel>", self._wheel, add="+")
         self.windows: list[cs.Window] = []
-        self._key = None
+        # 窓のフォルダ → {"frame", "head", "head_key", "body", "rows": {セッション: (行, 鍵)}, "order"}。鍵が変わった所だけ作り直す
+        self._cards: dict[str, dict] = {}
+        self._card_order: list[str] = []
+        self._empty: tk.Label | None = None
+        self._attn_drawn = None
         self._active: str | None = None
         self._order: dict[str, list[str]] = {}  # 窓 → セッションの並び
         self._win_buttons = {}
         self._state_labels = {}
         self._title_buttons: dict[tuple[str, str], tk.Button] = {}
         self._tool_labels = {}
+        self._cpu_labels = {}
         self._prev: dict[tuple[str, str], str] = {}  # (窓, セッション) → 前に見た状態
         self.attention: set[tuple[str, str]] = set()  # 知らせているセッション。その窓を見たら消す
         self._results: queue.SimpleQueue = queue.SimpleQueue()
@@ -122,6 +137,7 @@ class ClaudePanel:
         self.visible = False
         threading.Thread(target=self._scan_loop, daemon=True).start()
         threading.Thread(target=self._git_loop, daemon=True).start()
+        threading.Thread(target=self._cpu_loop, daemon=True).start()
         self.frame.after(300, self._drain)
 
     # ── 表示・非表示 ──
@@ -155,6 +171,15 @@ class ClaudePanel:
                 self._results.put(("error", repr(e), time.time()))
             self._wake.wait(SCAN_SECONDS)
             self._wake.clear()
+
+    def _cpu_loop(self) -> None:
+        """CPU は一覧づくりと別に測る (一覧づくりは初回に記録を全部読むので数十秒かかることがあり、重いときほど遅れる)"""
+        while not self._stop.is_set():
+            try:
+                self._results.put(("cpu", self.sampler.sample(), time.time()))
+            except Exception:
+                pass
+            self._stop.wait(SCAN_SECONDS)
 
     def _git_loop(self) -> None:
         """git の状態は別に取る (遅い。一覧づくりを止めない)。取れたら一覧を取り直させる"""
@@ -204,7 +229,11 @@ class ClaudePanel:
     def _drain(self) -> None:
         latest = None
         while not self._results.empty():
-            latest = self._results.get()
+            got = self._results.get()
+            if got[0] == "cpu":
+                self.cpu = got[1]
+            else:
+                latest = got
         if latest:
             kind, data, _ = latest
             if kind == "ok":
@@ -241,29 +270,16 @@ class ClaudePanel:
         return [by_id[i] for i in self._order[w.folder]]
 
     def render(self) -> None:
-        """形 (窓・セッション・題名・編集先・URL) が変わったときだけ作り直し、状態・時刻・選択中の色は書き換えるだけにする。
-        3 秒ごとに全部作り直していたときは、「たった今」と「1分前」が行き来するたびに欄が消えて描き直され、ちらついた
-        (動いているセッションは書き込むたびに「たった今」に戻る。1 分で 6 回作り直していた)"""
+        """変わった所だけ作り直し、状態・時刻・選択中の色・CPU は書き換えるだけにする。
+        - 3 秒ごとに全部作り直していたときは、「たった今」と「1分前」が行き来するたびに欄が消えて描き直され、ちらついた
+          (動いているセッションは書き込むたびに「たった今」に戻る。1 分で 6 回作り直していた)
+        - 形が変わったら全部作り直していたときは、どこか 1 つの窓の未コミットの数・会話に出た URL・編集先が変わるたびに、
+          欄が丸ごと描き直された (2026-11-25)。いまは窓の見出し (窓の行・やり残し・URL) とセッションの行を別々に作り直す。
+          作り直す行は、新しい行を古い行の前に置いてから古い行を消す (間に何も無い瞬間を作らない)"""
         now = time.time()
         rows = [(w, self.ordered(w)) for w in self.windows]
-        shape = [(w.folder, tuple(w.urls), tuple(sorted((k, v.label()) for k, v in w.git.items())),
-                  [(x.id, x.title or x.last_prompt[:40], tuple(sorted(x.edited)), tuple(w.session_urls(x)))
-                   for x in ss]) for w, ss in rows]
-        if shape != self._key:
-            self._key = shape
-            self._win_buttons: dict[str, tk.Button] = {}
-            self._state_labels: dict[tuple[str, str], tuple[tk.Label, tk.Label]] = {}
-            self._title_buttons = {}
-            self._tool_labels: dict[tuple[str, str], tuple[tk.Label, Tooltip, tk.Frame]] = {}
-            self._attn_drawn = None
-            for c in self.inner.winfo_children():
-                c.destroy()
-            if not self.windows:
-                tk.Label(self.inner, text="Claude の入った VS Code の窓が\n開いていません", bg=BG, fg=FG_DIM,
-                         font=self.font, justify=tk.LEFT).pack(anchor=tk.W, padx=10, pady=10)
-            for w, ss in rows:
-                self._window_card(w, ss)
-            self._active = None  # 色を塗り直させる
+        if self._sync(rows):
+            self._active = self._attn_drawn = None  # 新しい部品の色を塗らせる
         # 書き換えるだけのもの
         active = self.active_folder()
         attn = frozenset(self.attention)
@@ -289,10 +305,163 @@ class ClaudePanel:
                 if labels[1].cget("text") != text:
                     labels[1].configure(text=text)
                 self._show_tool(w.folder, x)
+                self._show_cpu(w.folder, x)
+        self._show_total_cpu()
 
-    def _window_card(self, w: cs.Window, sessions: list[cs.Session]) -> None:
-        card = tk.Frame(self.inner, bg=CARD_BG)
-        card.pack(fill=tk.X, padx=6, pady=(4, 2))
+    # ── CPU ──
+    def cpu_text(self, sc: proc_cpu.SessionCpu | None) -> tuple[str, str]:
+        """セッションの CPU → (欄に出す文字, 吹き出し)。CPU_SHOW 未満なら ("", "")"""
+        if not self.cpu.interval or not sc or sc.cpu < CPU_SHOW:
+            return "", ""
+        top = sc.top()
+        busy = [p for p in sc.procs if p.cpu >= 0.5]
+        same = sum(1 for p in busy if top and p.name == top.name)
+        name = (top.name + (f" ×{same}" if same > 1 else "")) if top else ""
+        text = f"⚙ CPU {sc.cpu:.0f}%  {name}"
+        tip = [f"CPU {sc.cpu:.0f}% (PC 全体を 100%、{proc_cpu.NCPU} コア。{self.cpu.interval:.0f} 秒の平均)",
+               "この Claude のセッションと、それが起動したもの (テスト・ビルド・サーバ) の合計"]
+        for p in sc.procs[:6]:
+            cmd = p.cmd.strip()
+            tip.append(f"{p.cpu:5.1f}%  {p.name}" + (f"\n        {cmd[:140]}" if cmd else ""))
+        return text, "\n".join(tip)
+
+    def _show_cpu(self, folder: str, x: cs.Session) -> None:
+        """動いているものがあるときだけ、状態の札の下に「⚙ CPU 18%  node.exe ×3」を出す (書き換えるだけ)"""
+        got = self._cpu_labels.get((folder, x.id))
+        if not got:
+            return
+        label, tip, state = got
+        sc = self.cpu.sessions.get(x.id)
+        text, full = self.cpu_text(sc)
+        tip.text = full
+        fg = CPU_HEAVY_FG if sc and sc.cpu >= CPU_HEAVY else CPU_FG
+        if label.cget("text") == text and label.cget("fg") == fg:
+            return
+        label.configure(text=text, fg=fg)
+        if text and not label.winfo_manager():
+            label.pack(fill=tk.X, padx=(6, 0), after=state)
+        elif not text:
+            label.pack_forget()
+
+    def _owner_name(self, sid: str) -> str:
+        for w in self.windows:
+            for x in w.sessions:
+                if x.id == sid:
+                    return f"Claude {w.name}: {(x.title or x.last_prompt)[:30]}"
+        return f"Claude (欄に無いセッション {sid[:8]})"
+
+    def _show_total_cpu(self) -> None:
+        snap = self.cpu
+        if not snap.interval:
+            return
+        text = f"CPU {snap.total:.0f}%"
+        if self.cpu_label.cget("text") != text:
+            self.cpu_label.configure(text=text, fg=CPU_HEAVY_FG if snap.total >= 60 else FG_DIM)
+        lines = [f"PC 全体 {snap.total:.0f}% ({proc_cpu.NCPU} コア。{snap.interval:.0f} 秒の平均)",
+                 "CPU を使った時間の割合 (タスクマネージャーの「詳細」タブと同じ。「プロセス」タブより高めに出る)",
+                 "重いもの:"]
+        for name, c, what in snap.top:
+            if c < 0.5:
+                break
+            lines.append(f"{c:5.1f}%  {self._owner_name(name) if what == 'session' else what}")
+        self.cpu_tip.text = "\n".join(lines)
+
+    # ── 作り直す範囲を絞る ──
+    @staticmethod
+    def _head_key(w: cs.Window) -> tuple:
+        g = w.git.get(cs.git_root(w.folder) or "")
+        return w.name, tuple(w.urls), tuple(sorted(w.added)), g.label() if g else ""
+
+    @staticmethod
+    def _row_key(w: cs.Window, x: cs.Session) -> tuple:
+        edited = tuple((r, w.git[r].label() if r in w.git else "") for r in sorted(x.edited)
+                       if not cs.same_path(r, w.folder))
+        return x.title or x.last_prompt[:40] or x.id[:8], x.last_prompt[:120], x.cwd, edited, tuple(w.session_urls(x))
+
+    def _forget(self, pred: Callable[[tuple[str, str]], bool]) -> None:
+        for reg in (self._state_labels, self._title_buttons, self._tool_labels, self._cpu_labels):
+            for k in [k for k in reg if pred(k)]:
+                del reg[k]
+
+    def _sync(self, rows: list[tuple[cs.Window, list[cs.Session]]]) -> bool:
+        """欄の部品を一覧に合わせる。作った部品があれば True"""
+        made = False
+        if not rows and not self._empty:
+            self._empty = tk.Label(self.inner, text="Claude の入った VS Code の窓が\n開いていません", bg=BG, fg=FG_DIM,
+                                   font=self.font, justify=tk.LEFT)
+            self._empty.pack(anchor=tk.W, padx=10, pady=10)
+        elif rows and self._empty:
+            self._empty.destroy()
+            self._empty = None
+        alive = {w.folder for w, _ in rows}
+        for folder in [f for f in self._cards if f not in alive]:  # 閉じた窓
+            self._cards.pop(folder)["frame"].destroy()
+            self._win_buttons.pop(folder, None)
+            self._forget(lambda k: k[0] == folder)
+        for w, ss in rows:
+            c = self._cards.get(w.folder)
+            if c is None:
+                frame = tk.Frame(self.inner, bg=CARD_BG)
+                body = tk.Frame(frame, bg=CARD_BG)
+                c = self._cards[w.folder] = {"frame": frame, "head": None, "head_key": None, "body": body,
+                                             "rows": {}, "order": []}
+            hk = self._head_key(w)
+            if hk != c["head_key"]:
+                head = tk.Frame(c["frame"], bg=CARD_BG)
+                self._window_head(head, w)
+                self._swap(c["head"], head, before=c["body"])
+                c["head"], c["head_key"] = head, hk
+                made = True
+            # セッションの行
+            ids = [x.id for x in ss]
+            for sid in [i for i in c["rows"] if i not in ids]:
+                c["rows"].pop(sid)[0].destroy()
+                self._forget(lambda k, sid=sid: k == (w.folder, sid))
+            for x in ss:
+                rk = self._row_key(w, x)
+                old = c["rows"].get(x.id)
+                if old and old[1] == rk:
+                    continue
+                row = tk.Frame(c["body"], bg=CARD_BG)
+                self._session_row(row, w, x)
+                if old:
+                    self._swap(old[0], row)
+                c["rows"][x.id] = (row, rk)
+                made = True
+            if ids != c["order"]:  # 並びが変わった・行が増えた (ほとんど無い)
+                for sid in ids:
+                    c["rows"][sid][0].pack_forget()
+                for sid in ids:
+                    c["rows"][sid][0].pack(fill=tk.X, padx=(10, 0), pady=(3, 0))
+                c["order"] = ids
+        order = [w.folder for w, _ in rows]
+        if order != self._card_order:  # 窓が開いた・閉じた
+            for f in order:
+                self._cards[f]["frame"].pack_forget()
+            for f in order:
+                self._cards[f]["frame"].pack(fill=tk.X, padx=6, pady=(4, 2))
+            self._card_order = order
+        return made
+
+    @staticmethod
+    def _swap(old: tk.Widget | None, new: tk.Widget, before: tk.Widget | None = None) -> None:
+        """new を old の場所に置いて old を消す。old が無ければ before の前 (無ければ末尾) に置く"""
+        info = dict(old.pack_info()) if old is not None and old.winfo_manager() else None
+        if info:
+            info.pop("in", None)
+            new.pack(**info, before=old)
+            old.destroy()
+            return
+        if old is not None:
+            old.destroy()
+        if before is not None and before.winfo_manager():
+            new.pack(fill=tk.X, before=before)
+        else:
+            new.pack(fill=tk.X)
+            if before is not None:
+                before.pack(fill=tk.X)
+
+    def _window_head(self, card: tk.Frame, w: cs.Window) -> None:
         b = tk.Button(card, text=f"▣ {w.name}", anchor=tk.W, bg=WIN_BG, fg=FG, activebackground=WIN_ACTIVE,
                       activeforeground=FG, relief=tk.FLAT, bd=0, padx=8, pady=4, font=self.font_bold, cursor="hand2",
                       command=lambda w=w: self.dock.focus_vscode(w.folder, w.name))
@@ -308,8 +477,6 @@ class ClaudePanel:
                 fill=tk.X, padx=(10, 0))
         for url, name in w.urls:
             self._link(card, w, url, name, indent=10, added=url in w.added)
-        for x in sessions:
-            self._session_row(card, w, x)
 
     def _show_tool(self, folder: str, x: cs.Session) -> None:
         """動作中でなく、道具の結果を待っているときだけ、状態の札の下に「▸ Bash: npm test」を出す
@@ -336,10 +503,9 @@ class ClaudePanel:
             return ATTN_HOVER if hover else ATTN_BG
         return WIN_HOVER if hover else WIN_BG
 
-    def _session_row(self, parent: tk.Misc, w: cs.Window, s: cs.Session) -> None:
-        row = tk.Frame(parent, bg=CARD_BG)
-        row.pack(fill=tk.X, padx=(10, 0), pady=(3, 0))
-        state = tk.Frame(row, bg=CARD_BG)  # 状態の札 (押せない。塗りも枠も付けない)。文字と色は render が書き換える
+    def _session_row(self, row: tk.Frame, w: cs.Window, s: cs.Session) -> None:
+        """セッションの行の中身を row に作る (row を置くのは _sync)"""
+        state =tk.Frame(row, bg=CARD_BG)  # 状態の札 (押せない。塗りも枠も付けない)。文字と色は render が書き換える
         state.pack(fill=tk.X)
         mark = tk.Label(state, text="", bg=CARD_BG, fg=FG_DIM, font=self.font)
         mark.pack(side=tk.LEFT)
@@ -351,6 +517,9 @@ class ClaudePanel:
                         justify=tk.LEFT, wraplength=PANEL_W - 50)
         tool_tip = Tooltip(tool, "")
         self._tool_labels[(w.folder, s.id)] = (tool, tool_tip, state)
+        # CPU (押せない札)。出すかどうかと文字は render が書き換える
+        cpu = tk.Label(row, text="", bg=CARD_BG, fg=CPU_FG, font=self.font_small, anchor=tk.W)
+        self._cpu_labels[(w.folder, s.id)] = (cpu, Tooltip(cpu, ""), state)
         title = s.title or s.last_prompt[:40] or s.id[:8]
         b = tk.Button(row, text=title, anchor=tk.W, justify=tk.LEFT, wraplength=PANEL_W - 50, bg=ROW_BG, fg=FG,
                       activebackground=ROW_HOVER, activeforeground=FG, relief=tk.FLAT, bd=0, padx=6, pady=2,

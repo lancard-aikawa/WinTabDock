@@ -60,7 +60,15 @@ uv run demo/shoot_claude.py     # README の Claude の欄の画面。ホーム�
   `pid` はどの窓も同じ (VS Code は 1 つのプロセス) なので、窓との対応は題名で取る。題名は
   「前のタブ - フォルダ名 - Visual Studio Code」で、前のタブが Claude のチャットならセッションの題名になる
 - セッションは `~/.claude/projects/<フォルダの英数字以外を -に>/*.jsonl`。フォルダ名は `C--` と `c--` が混ざるので大文字小文字を無視して探す。
-  記録は数 MB になるので、ファイルごとに読んだ位置を覚えて増えた分だけ読む (最初の 1 回は全部で数秒かかる。別のスレッドで回す)
+  記録は数 MB になるので、ファイルごとに読んだ位置を覚えて増えた分だけ読む (最初の 1 回は全部読む。別のスレッドで回す)
+- **記録の読み方** (`Scanner._read`・`_line`): 記録は 1 つで数百 MB になる (2026-11-25、3 日分 11 ファイルで 811 MB、最大 616 MB)。
+  中身の 6 割強は道具の結果 (ファイルの中身・コマンドの出力)、2 割強は `api-request` 系で、欄が使う会話の行は 1 割に満たない。
+  全部を `json.loads` していたときは最初の一覧づくりに 40 秒かかった。いまは JSON を読む前に先頭の形で外す:
+  `{"type":"` で始まる行は `ai-title`・`last-prompt` だけ読む。道具の結果だけの行 (`TOOL_RESULT_HEAD`) は `"tool_use_id"` を
+  正規表現で抜くだけにする。ほかは元どおり JSON で読む。1 行ずつ 1 MB のバッファで読む (丸ごと読んで split すると、その分のメモリを
+  一時に使った。既定の 8KB のバッファより倍近く速い)。編集の時刻 (strptime) は編集の道具のときだけ解く。
+  `uv run check_claude_parse.py` で確かめる (12 項目)。Claude Code が記録の形を変えて近道に乗らなくなっても、JSON で読むので
+  遅くなるだけで結果は変わらない。人の記録で元の読み方と同じ結果になるかは、7 日分 18 ファイル (937 MB) で突き合わせた
 - 状態: 記録が 15 秒以内に増えた = 動作中、最後の返事が道具を呼ばずに終わった = 返事待ち、道具を呼んだまま結果が 30 秒返らない
   = 許可待ちかも (許可を待っている間は記録が増えないので、長いコマンドと見分けられない)、それ以外 = 考え中か中断
 - 待っている道具 (`Session.pending`): 呼び出し (`tool_use` の `id`) を足し、結果 (`tool_result` の `tool_use_id`) で消す。
@@ -75,9 +83,25 @@ uv run demo/shoot_claude.py     # README の Claude の欄の画面。ホーム�
   (黒い窓を出さない)・5 秒で打ち切り。手元の 12 のリポジトリで 1 か所 0.4〜1.2 秒、合わせて約 9 秒かかったので、一覧づくりとは
   別のスレッドで 30 秒ごとに取り、一覧づくりは覚えている値を付けるだけにする (`scan(git=False)`・`refresh_git`)。
   持ち主の違うリポジトリ (dubious ownership) と共有フォルダの git は失敗するので札を出さない
+- **CPU** (`proc_cpu.py`、`ClaudePanel._cpu_loop`): プロセスとセッションの対応は `~/.claude/sessions/<pid>.json`
+  (Claude Code が起動中のプロセスごとに書く。`sessionId` と `procStart` = 作成時刻の FILETIME)。作成時刻が違えば pid の使い回しとして捨てる。
+  プロセスの一覧と CPU の時間は `NtQuerySystemInformation(SystemProcessInformation)` で一度に読む。OpenProcess + GetProcessTimes では、
+  管理者でないと MsMpEng・SearchIndexer・vmmemWSL・dwm・svchost が開けず、重くなりがちなものほど測れなかった (2026-11-25)。
+  子孫は親の pid でたどり、親より後に作られたものだけ子とみなす。コマンドラインは各セッションの上位 3 つだけ
+  `NtQueryInformationProcess(ProcessCommandLineInformation)` で読み、(pid, 作成時刻) で覚える。
+  一覧づくり (初回は記録を全部読むので、手元で 30 秒かかった) と別のスレッドで 3 秒ごとに測る (重いときほど一覧づくりが遅れるため)。
+  割合は CPU の時間で、全コアが埋まっていたときに 100%、タスクマネージャーの Processor Utility は 26% だった (i7-12650H)。
+  `uv run proc_cpu.py` で今の内訳を文字で出せる。`uv run check_claude_cpu.py` で確かめる (画面に何も出さない。15 項目)。
+  検査で立てる busy loop は、PC が混んでいると 1 コアを取れない (0.3 コアほどのことがあった) ので、下限を緩くしてある
 - 欄の一覧は 3 秒ごとに取り直すが、作り直すのは形 (窓・セッション・題名・編集先・URL) が変わったときだけ。状態・時刻・選択中の色は
   部品の文字と色を書き換えるだけにする。全部作り直していたときは、動いているセッションの「たった今」と「1分前」が行き来するたびに
-  欄が消えて描き直され、ちらついた (1 分で 6 回)。セッションの並びも、新しいセッションが出たときだけ変える
+  欄が消えて描き直され、ちらついた (1 分で 6 回)。セッションの並びも、新しいセッションが出たときだけ変える。
+  形が変わったときも、作り直すのは変わった所だけ (`ClaudePanel._sync`)。窓ごとに見出し (窓の行・やり残し・窓の URL) と
+  セッションの行に鍵 (`_head_key`・`_row_key`) を持ち、鍵の変わった部品だけ作る。作り直す部品は新しいものを古いものの前に置いてから
+  古いものを消す (`_swap`。間に何も無い瞬間を作らない)。形が変わったら全部作り直していたときは、どれか 1 つの窓の未コミットの数が
+  変わるだけで欄が丸ごと描き直され、手元の 200 秒で 4 回、全部が git の数の変化だった。起動直後は git の状態が窓ごとに届くたびに
+  丸ごと描き直していた (2026-11-25)。`uv run check_claude_redraw.py` で、何を変えたらどの部品が作り直されるかを確かめる
+  (画面に何も出さない。21 項目)
 - 自動取り込みは欄の一覧が届くたび (3 秒ごと) に `adopt_vscode_windows` で行う。VS Code の新しい窓は、出た直後は題名に
   フォルダ名が無く、ロックファイルもまだ無いので、窓が出たとき (WinEvent) ではなく一覧に載ってから取り込む
 - **タブにした窓が自分で出たり動いたりしたら戻す** (`keep_tabs_in_place`、`poll` から 0.5 秒ごと): VS Code の窓を自動で取り込んだ直後に、
@@ -109,6 +133,9 @@ uv run check_startup.py PortWho RepoTether       # 起動時に開く: 選び方
 uv run check_claude_panel.py                     # Claude の欄: VS Code の窓の自動取り込み (VS Code に似せた窓で。人の VS Code には触らない。人の画面に出ない別のデスクトップで流す。13 項目)
 uv run check_claude_links.py                     # Claude の欄: URL を足す・隠す (link のコマンドと右クリック。画面に何も出さない)
 uv run check_claude_notice.py                    # Claude の欄: 返事待ちの知らせ・待っている道具・git のやり残し (画面に何も出さない。36 項目)
+uv run check_claude_cpu.py                       # Claude の欄: セッションごとの CPU (子に CPU を食わせて数えるか。画面に何も出さない。15 項目)
+uv run check_claude_redraw.py                    # Claude の欄: 変わった所だけ作り直すか (画面に何も出さない。21 項目)
+uv run check_claude_parse.py                     # Claude の欄: 記録の読み方 (要らない行を JSON を読まずに外す近道。12 項目)
 uv run check_taskbar.py PortWho RepoTether       # ドックを閉じたあと、ツールがタスクバーに戻るか (UI Automation で見る)
 uv run check_close.py PortWho RepoTether         # × を押したとき: 一緒に閉じる / 残す / たずねる / × を無視するアプリ
 ```
