@@ -48,7 +48,7 @@ uv run demo/shoot_claude.py     # README の Claude の欄の画面。ホーム�
   控えを消す。ドックは閉じない。`SetProcessShutdownParameters(0x3FF)` で、アプリの中で最初に知らせを受ける。
   手を放さずにいたときは、Windows の再起動がほかのアプリに止められて取り消され (Winlogon 4004・User32 1073)、ドックだけが
   終わらされて VS Code の窓が隠れたまま残った。そのあと VS Code を起動し直すと、隠れていた窓が最小化で開いた (2026-11-26、ユーザーの報告)。
-  `uv run check_endsession.py` で確かめる (別のデスクトップで流す。22 項目)。本物の再起動では確かめていない
+  `uv run check_endsession.py` で確かめる (別のデスクトップで流す。18 項目)。本物の再起動では確かめていない
 
 ### 採らなかったやり方 (試して問題が出たもの)
 
