@@ -125,10 +125,12 @@ session(notes, "s4", "画像の圧縮ツールを比べて試作する", "",
 import proc_cpu  # noqa: E402  (USERPROFILE を架空のホームに向けた後で読む。セッションの対応も架空の ~/.claude/sessions を見る)
 
 # 「注文 API に在庫の確認を足す」(s3) が npm test を走らせている、を見せる: claude.exe の代わりのプロセスが node を 2 つ回す
+# CPU を回すものは 60 秒で自分で終わる。撮影が途中で落ちて片付け (taskkill) が流れなくても残らない
+# (2026-11-25、確かめのスクリプトが落ちて while 1 の 2 つが残り、CPU を使い続けた)
 BURN = shutil.which("node")
 STAND_IN = ("import subprocess, sys, time; "
-            f"cmd = {[BURN, '-e', 'for(;;){}'] if BURN else [sys.executable, '-c', 'while 1: pass']!r}; "
-            "ps = [subprocess.Popen(cmd, creationflags=0x08000000) for _ in range(2)]; time.sleep(120)")
+            f"cmd = {[BURN, '-e', 'const e = Date.now() + 60000; while (Date.now() < e) {}'] if BURN else [sys.executable, '-c', 'import time; e = time.time() + 60' + chr(10) + 'while time.time() < e: pass']!r}; "
+            "ps = [subprocess.Popen(cmd, creationflags=0x08000000) for _ in range(2)]; time.sleep(60)")
 
 
 def window_image(hwnd, visible):

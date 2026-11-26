@@ -47,7 +47,10 @@ other = next(p for p in mine.values() if p[0] not in (0, me) and p[3])
 write_session(other[0], "sess-reused", other[3] + 1)
 (SESS / "broken.json").write_text("{", encoding="utf-8")  # 読めないものは飛ばす
 
-burn = [subprocess.Popen([sys.executable, "-c", "while 1: pass"], creationflags=0x08000000) for _ in range(2)]
+# CPU を回すものは 30 秒で自分で終わる (検査が途中で落ちても残らない。下の finally でも止める)。
+# 2026-11-25、確かめのスクリプトが kill の前で落ち、while 1 の 2 つが残って CPU を使い続けた
+BURN = "import time\ne = time.time() + 30\nwhile time.time() < e: pass"
+burn = [subprocess.Popen([sys.executable, "-c", BURN], creationflags=0x08000000) for _ in range(2)]
 try:
     s = proc_cpu.CpuSampler(SESS)
     time.sleep(0.5)  # 起動の分を外す
@@ -65,7 +68,7 @@ try:
     burners = {b.pid for b in burn}
     check("重いものの一覧に、立てた 2 つが入る", sc is not None and burners <= {p.pid for p in sc.procs[:3]})
     check("一番重いものは子 (自分の claude.exe 役ではない)", sc is not None and sc.top() and sc.top().pid in burners)
-    check("重いものにコマンドラインが付く", sc is not None and any("while 1" in p.cmd for p in sc.procs[:3]))
+    check("重いものにコマンドラインが付く", sc is not None and any("time.time() < e" in p.cmd for p in sc.procs[:3]))
     check("pid を使い回した別のプロセスは数えない", "sess-reused" not in snap.sessions)
     check("全体の割合が出る", 0 < snap.total <= 100, snap.total)
     check("全体の上位に、このセッションが入る",
@@ -88,7 +91,7 @@ try:
     panel.cpu = snap
     text, tip = panel.cpu_text(sc)
     check("行の文字は「⚙ CPU n%  python.exe ×2」の形", text.startswith("⚙ CPU ") and "python.exe ×" in text, text)
-    check("吹き出しにコマンドラインが出る", "while 1" in tip, tip)
+    check("吹き出しにコマンドラインが出る", "e = time.time() + 30" in tip, tip)
     small = proc_cpu.SessionCpu("x", 1, cpu=claude_panel.CPU_SHOW - 0.1)
     check("CPU_SHOW 未満なら出さない", panel.cpu_text(small) == ("", ""))
     panel.cpu = proc_cpu.Snapshot()

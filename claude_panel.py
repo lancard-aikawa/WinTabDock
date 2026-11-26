@@ -321,7 +321,7 @@ class ClaudePanel:
         tip = [f"CPU {sc.cpu:.0f}% (PC 全体を 100%、{proc_cpu.NCPU} コア。{self.cpu.interval:.0f} 秒の平均)",
                "この Claude のセッションと、それが起動したもの (テスト・ビルド・サーバ) の合計"]
         for p in sc.procs[:6]:
-            cmd = p.cmd.strip()
+            cmd = " ".join(p.cmd.split())  # python -c の複数行などは 1 行にまとめる
             tip.append(f"{p.cpu:5.1f}%  {p.name}" + (f"\n        {cmd[:140]}" if cmd else ""))
         return text, "\n".join(tip)
 
