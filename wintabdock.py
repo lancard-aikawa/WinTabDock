@@ -264,8 +264,15 @@ STATE = state_path()  # このドックの控え
 
 def save_state(tabs: list["Tab"]) -> None:
     STATE.parent.mkdir(parents=True, exist_ok=True)
+    # pid: 戻すときに、同じ番号の別の窓 (再起動のあとなど) に触らないため
     STATE.write_text(json.dumps([{"hwnd": t.hwnd, "style": t.style, "exstyle": t.exstyle, "rect": t.rect,
-                                  "owner": t.owner, "maximized": t.maximized} for t in tabs]), encoding="utf-8")
+                                  "owner": t.owner, "maximized": t.maximized, "pid": window_pid(t.hwnd)}
+                                 for t in tabs]), encoding="utf-8")
+
+
+def boot_time() -> float:
+    ctypes.windll.kernel32.GetTickCount64.restype = ctypes.c_ulonglong
+    return time.time() - ctypes.windll.kernel32.GetTickCount64() / 1000
 
 
 def other_docks() -> list[int]:
@@ -322,8 +329,12 @@ def taskbar_add(hwnd: int) -> bool:
 
 def _restore_file(path: Path) -> int:
     n = 0
+    # PC を起動し直す前の控えの窓の番号は、いまは無関係な窓を指している (戻すと、その窓の枠や位置を書き換える)。窓に触らずに捨てる
+    if path.stat().st_mtime < boot_time():
+        path.unlink()
+        return 0
     for s in json.loads(path.read_text(encoding="utf-8")):
-        if user32.IsWindow(s["hwnd"]):
+        if user32.IsWindow(s["hwnd"]) and s.get("pid", window_pid(s["hwnd"])) == window_pid(s["hwnd"]):
             restore_window(s["hwnd"], s["style"], s["exstyle"], tuple(s["rect"]), s.get("owner", 0),
                            s.get("maximized", False))
             n += 1
@@ -648,6 +659,8 @@ class Dock:
                               bg="#0d0d1a", fg=TAB_FG_DIM)
         self.empty.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
         self.root.protocol("WM_DELETE_WINDOW", self.request_close)
+        # Windows の終了・再起動・サインアウト (Tk は WM_QUERYENDSESSION をこれに変え、その場で呼ぶ)
+        self.root.protocol("WM_SAVE_YOURSELF", self.end_session)
         self.root.bind("<Configure>", lambda e: self.after_layout())
         self.root.bind("<Unmap>", lambda e: self.on_minimize() if e.widget is self.root else None)
         self.root.bind("<Map>", lambda e: self.on_restore() if e.widget is self.root else None)
@@ -1958,6 +1971,29 @@ class Dock:
         m.add_command(label="ツールを閉じる", command=lambda: self.close_tab(tab))
         m.tk_popup(event.x_root, event.y_root)
 
+    def end_session(self) -> None:
+        """Windows が終わる (再起動・シャットダウン・サインアウト) ときに、取り込んだ窓を全部元に戻す。ドックは閉じない
+        (終了が取り消されたら、空のドックが残る)。
+        手を放さずに再起動したら、隠していた VS Code の窓が再起動のあと最小化のまま開き、1 つしか出てこなかった
+        (2026-11-26、ユーザーの報告。控え state-<pid>.json も残ったが、再起動のあとの窓の番号は別の窓を指す)。
+        Windows はここから数秒で答えを待つのをやめるので、窓を戻すだけにして、タブの選び直しや保存の繰り返しはしない"""
+        if not self.tabs:
+            return
+        self.save_session()  # 次に開いたときの「前回のタブ」
+        for t in list(self.tabs):
+            self.ignored.add(t.hwnd)  # 終了が取り消されても、自動取り込みが取り込み直さない
+            try:
+                restore_window(t.hwnd, t.style, t.exstyle, t.rect, t.owner, t.maximized)
+            except Exception:
+                pass
+            if t.button:
+                t.button.destroy()
+        self.tabs.clear()
+        self.active = None
+        if STATE.exists():
+            STATE.unlink()
+        self.empty.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
+
     def quit(self) -> None:
         self.save_session()  # 窓を戻す前に並びを覚える (戻すたびに保存すると空になる)
         self._closing = True
@@ -2051,6 +2087,9 @@ def main() -> None:
     n = rescue()  # 前回落ちたときに隠れたままの窓を戻す
     if n:
         print(f"[WinTabDock] 前回の窓を {n} 個元に戻しました")
+    # Windows が終わるとき、アプリの中で最初に知らせを受ける (0x300-0x3FF はアプリの「先に終わる」範囲。既定は 0x280)。
+    # 取り込んだ VS Code などが自分の窓の状態を控える前に、窓を元に戻すため (Dock.end_session)
+    ctypes.windll.kernel32.SetProcessShutdownParameters(0x3FF, 0)
     tools, settings = load_config()
     if "--selftest" not in sys.argv:
         Dock(tools, settings).root.mainloop()

@@ -40,7 +40,15 @@ uv run demo/shoot_claude.py     # README の Claude の欄の画面。ホーム�
   ドックが落ちても相手の窓とプロセスは残り (所有者が外れるだけ)、次の起動か `--rescue` で元の枠に戻る。
   戻すのは、もう動いていないドックの控えだけ。1 つの `state.json` を共有していたときは、2 つ目のドックが
   動いている方のドックの控えを「前回落ちたもの」と取り違えて窓を戻し、控えを消した。
-  以前の共有の `state.json` は、ほかにドックが開いていないときの `--rescue` でだけ扱う
+  以前の共有の `state.json` は、ほかにドックが開いていないときの `--rescue` でだけ扱う。
+  控えには窓のプロセス番号 (`pid`) も書き、戻すときに窓のプロセスが違えば触らない。PC を起動し直す前に書かれた控えは、
+  窓に触らずに捨てる (起動し直したあとの窓の番号は、無関係な窓を指していることがある)
+- **Windows の終了・再起動・サインアウト** (`Dock.end_session`): Tk は `WM_QUERYENDSESSION` を受けると、その場で
+  `WM_SAVE_YOURSELF` の処理を呼び、1 (終了してよい) と答える (2026-11-26 に Tk の窓へ送って確かめた)。ここで取り込んだ窓を全部元に戻し、
+  控えを消す。ドックは閉じない。`SetProcessShutdownParameters(0x3FF)` で、アプリの中で最初に知らせを受ける。
+  手を放さずにいたときは、Windows の再起動がほかのアプリに止められて取り消され (Winlogon 4004・User32 1073)、ドックだけが
+  終わらされて VS Code の窓が隠れたまま残った。そのあと VS Code を起動し直すと、隠れていた窓が最小化で開いた (2026-11-26、ユーザーの報告)。
+  `uv run check_endsession.py` で確かめる (別のデスクトップで流す。22 項目)。本物の再起動では確かめていない
 
 ### 採らなかったやり方 (試して問題が出たもの)
 
@@ -128,6 +136,7 @@ uv run demo/shoot_claude.py     # README の Claude の欄の画面。ホーム�
 uv run wintabdock.py --selftest LPortMan PortWho   # 取り込み・二重起動・切り替え・リサイズ・移動 (途中も見えるか)・メニュー・最小化・別アプリとの重なり・起動時に開く・閉じるときのツール・外す・閉じる・自動取り込み (48 項目)
 uv run check_rescue.py LPortMan                  # 取り込んだまま落として、--rescue で戻るか
 uv run check_state_files.py                      # 動いているドックの控えに触らないか (窓には触れない)
+uv run check_endsession.py                       # Windows の終了の知らせで窓を元に戻すか・古い控えで窓に触らないか (別のデスクトップで流す)
 uv run check_session.py PortWho RepoTether       # 前回のタブ: 起動中なら取り込み、なければ起動して並べ直すか
 uv run check_startup.py PortWho RepoTether       # 起動時に開く: 選び方ごとに開くもの・起動するものが変わるか
 uv run check_claude_panel.py                     # Claude の欄: VS Code の窓の自動取り込み (VS Code に似せた窓で。人の VS Code には触らない。人の画面に出ない別のデスクトップで流す。13 項目)
